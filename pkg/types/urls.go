@@ -17,7 +17,6 @@ package types
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -39,12 +38,14 @@ func NewURLs(strs []string) (URLs, error) {
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return nil, fmt.Errorf("URL scheme must be http or https: %s", in)
 		}
+		/*
 		if _, _, err := net.SplitHostPort(u.Host); err != nil {
 			return nil, fmt.Errorf(`URL address does not have the form "host:port": %s`, in)
 		}
 		if u.Path != "" {
 			return nil, fmt.Errorf("URL must not contain a path: %s", in)
 		}
+		*/
 		all[i] = *u
 	}
 	us := URLs(all)
