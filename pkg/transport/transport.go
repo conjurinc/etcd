@@ -39,6 +39,7 @@ func NewTransport(info TLSInfo, dialtimeoutd time.Duration) (*http.Transport, er
 		// value taken from http.DefaultTransport
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:     cfg,
+		DisableKeepAlives:   true,
 	}
 
 	dialer := (&net.Dialer{
@@ -54,6 +55,7 @@ func NewTransport(info TLSInfo, dialtimeoutd time.Duration) (*http.Transport, er
 		Dial:                dial,
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:     cfg,
+		DisableKeepAlives:   true,
 	}
 	ut := &unixTransport{tu}
 
