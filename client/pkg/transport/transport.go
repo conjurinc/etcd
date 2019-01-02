@@ -40,6 +40,7 @@ func NewTransport(info TLSInfo, dialtimeoutd time.Duration) (*http.Transport, er
 		// value taken from http.DefaultTransport
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:     cfg,
+		DisableKeepAlives:   true,
 	}
 
 	dialer := &net.Dialer{
@@ -55,6 +56,7 @@ func NewTransport(info TLSInfo, dialtimeoutd time.Duration) (*http.Transport, er
 		DialContext:         dialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:     cfg,
+		DisableKeepAlives:   true,
 		// Cost of reopening connection on sockets is low, and they are mostly used in testing.
 		// Long living unix-transport connections were leading to 'leak' test flakes.
 		// Alternativly the returned Transport (t) should override CloseIdleConnections to
