@@ -43,7 +43,11 @@ import (
 	"go.uber.org/zap"
 )
 
-const maxLearners = 1
+// For Conjur Enterprise, we want to allow up to 5 Learners (aka Standbys) to be
+// added at a time. This is to better allow defining the member during seed
+// generation from when we configure the Standby. This way, we can pre-configure
+// up to 5 Standbys before needing to configure any of them.
+const maxLearners = 5
 
 // RaftCluster is a list of Members that belong to the same raft cluster
 type RaftCluster struct {
