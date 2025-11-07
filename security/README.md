@@ -43,6 +43,6 @@ This list provides actionable information regarding etcd security to multiple di
 
 ### Request to Join
 
-New membership requests are sent to security@etcd.io.
+New membership requests are sent to [security@etcd.io](mailto:security@etcd.io).
 
 File an issue [here](https://github.com/etcd-io/etcd/issues/new?template=distributors-application.md), filling in the criteria template.

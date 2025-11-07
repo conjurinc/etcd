@@ -15,10 +15,9 @@
 package mvcc
 
 import (
-	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/pkg/v3/traceutil"
@@ -70,7 +69,7 @@ func benchmarkStoreRange(b *testing.B, n int) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		s.Range(context.TODO(), begin, end, RangeOptions{})
+		s.Range(b.Context(), begin, end, RangeOptions{})
 	}
 }
 
@@ -152,7 +151,7 @@ func benchmarkStoreRestore(revsPerKey int, b *testing.B) {
 			txn.End()
 		}
 	}
-	assert.NoError(b, s.Close())
+	require.NoError(b, s.Close())
 
 	b.ReportAllocs()
 	b.ResetTimer()

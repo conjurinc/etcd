@@ -40,17 +40,15 @@ func testCurlV3LockOperations(cx ctlCtx) {
 		Endpoint: "/v3/lock/lock",
 		Value:    string(lockReq),
 	})
-	resp, err := runCommandAndReadJsonOutput(args)
+	resp, err := runCommandAndReadJSONOutput(args)
 	require.NoError(cx.t, err)
 	key, ok := resp["key"]
 	require.True(cx.t, ok)
 
 	// unlock
-	if err = e2e.CURLPost(cx.epc, e2e.CURLReq{
+	require.NoErrorf(cx.t, e2e.CURLPost(cx.epc, e2e.CURLReq{
 		Endpoint: "/v3/lock/unlock",
 		Value:    fmt.Sprintf(`{"key": "%v"}`, key),
 		Expected: expect.ExpectedResponse{Value: "revision"},
-	}); err != nil {
-		cx.t.Fatalf("testCurlV3LockOperations failed to execute unlock (%v)", err)
-	}
+	}), "testCurlV3LockOperations failed to execute unlock")
 }

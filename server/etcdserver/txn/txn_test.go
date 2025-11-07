@@ -16,6 +16,9 @@ package txn
 
 import (
 	"context"
+	"crypto/sha256"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -223,7 +226,7 @@ func TestCheckTxn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, lessor := setup(t, tc.setup)
 
-			ctx, cancel := context.WithCancel(context.TODO())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			_, _, err := Txn(ctx, zaptest.NewLogger(t), tc.txn, false, s, lessor)
 
@@ -243,7 +246,7 @@ func TestCheckPut(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, lessor := setup(t, tc.setup)
 
-			ctx, cancel := context.WithCancel(context.TODO())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			_, _, err := Put(ctx, zaptest.NewLogger(t), lessor, s, tc.op.GetRequestPut())
 
@@ -263,7 +266,7 @@ func TestCheckRange(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := setup(t, tc.setup)
 
-			ctx, cancel := context.WithCancel(context.TODO())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			_, _, err := Range(ctx, zaptest.NewLogger(t), s, tc.op.GetRequestRange())
 
@@ -311,7 +314,7 @@ func TestReadonlyTxnError(t *testing.T) {
 	defer s.Close()
 
 	// setup cancelled context
-	ctx, cancel := context.WithCancel(context.TODO())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	// put some data to prevent early termination in rangeKeys
@@ -336,14 +339,13 @@ func TestReadonlyTxnError(t *testing.T) {
 	}
 }
 
-func TestWriteTxnPanic(t *testing.T) {
-	b, _ := betesting.NewDefaultTmpBackend(t)
-	defer betesting.Close(t, b)
+func TestWriteTxnPanicWithoutApply(t *testing.T) {
+	b, bePath := betesting.NewDefaultTmpBackend(t)
 	s := mvcc.NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, mvcc.StoreConfig{})
 	defer s.Close()
 
 	// setup cancelled context
-	ctx, cancel := context.WithCancel(context.TODO())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	// write txn that puts some data and then fails in range due to cancelled context
@@ -367,7 +369,17 @@ func TestWriteTxnPanic(t *testing.T) {
 		},
 	}
 
-	assert.Panics(t, func() { Txn(ctx, zaptest.NewLogger(t), txn, false, s, &lease.FakeLessor{}) }, "Expected panic in Txn with writes")
+	// compute DB file hash before applying the txn
+	dbHashBefore, err := computeFileHash(bePath)
+	require.NoErrorf(t, err, "failed to compute DB file hash before txn")
+
+	// we verify the following properties below:
+	// 1. server panics after a write txn aply fails (invariant: server should never try to move on from a failed write)
+	// 2. no writes from the txn are applied to the backend (invariant: failed write should have no side-effect on DB state besides panic)
+	assert.Panicsf(t, func() { Txn(ctx, zaptest.NewLogger(t), txn, false, s, &lease.FakeLessor{}) }, "Expected panic in Txn with writes")
+	dbHashAfter, err := computeFileHash(bePath)
+	require.NoErrorf(t, err, "failed to compute DB file hash after txn")
+	require.Equalf(t, dbHashBefore, dbHashAfter, "mismatch in DB hash before and after failed write txn")
 }
 
 func TestCheckTxnAuth(t *testing.T) {
@@ -564,6 +576,20 @@ func setupAuth(t *testing.T, be backend.Backend) auth.AuthStore {
 	require.NoError(t, err)
 
 	return as
+}
+
+func computeFileHash(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", err
+	}
+	return string(h.Sum(nil)), nil
 }
 
 // CheckTxnAuth variables setup.

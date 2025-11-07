@@ -17,7 +17,6 @@ package clientv3
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -38,6 +37,7 @@ import (
 )
 
 func NewClient(t *testing.T, cfg Config) (*Client, error) {
+	t.Helper()
 	if cfg.Logger == nil {
 		cfg.Logger = zaptest.NewLogger(t).Named("client")
 	}
@@ -49,19 +49,16 @@ func TestDialCancel(t *testing.T) {
 
 	// accept first connection so client is created with dial timeout
 	ln, err := net.Listen("unix", "dialcancel:12345")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer ln.Close()
 
 	ep := "unix://dialcancel:12345"
 	cfg := Config{
 		Endpoints:   []string{ep},
-		DialTimeout: 30 * time.Second}
-	c, err := NewClient(t, cfg)
-	if err != nil {
-		t.Fatal(err)
+		DialTimeout: 30 * time.Second,
 	}
+	c, err := NewClient(t, cfg)
+	require.NoError(t, err)
 
 	// connect to ipv4 black hole so dial blocks
 	c.SetEndpoints("http://254.0.0.1:12345")
@@ -150,74 +147,105 @@ func TestDialTimeout(t *testing.T) {
 func TestDialNoTimeout(t *testing.T) {
 	cfg := Config{Endpoints: []string{"127.0.0.1:12345"}}
 	c, err := NewClient(t, cfg)
-	if c == nil || err != nil {
-		t.Fatalf("new client with DialNoWait should succeed, got %v", err)
-	}
+	require.NotNilf(t, c, "new client with DialNoWait should succeed, got %v", err)
+	require.NoErrorf(t, err, "new client with DialNoWait should succeed")
 	c.Close()
 }
 
+func TestMaxUnaryRetries(t *testing.T) {
+	maxUnaryRetries := uint(10)
+	cfg := Config{
+		Endpoints:       []string{"127.0.0.1:12345"},
+		MaxUnaryRetries: maxUnaryRetries,
+	}
+	c, err := NewClient(t, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	defer c.Close()
+
+	require.Equal(t, maxUnaryRetries, c.cfg.MaxUnaryRetries)
+}
+
+func TestBackoff(t *testing.T) {
+	backoffWaitBetween := 100 * time.Millisecond
+	cfg := Config{
+		Endpoints:          []string{"127.0.0.1:12345"},
+		BackoffWaitBetween: backoffWaitBetween,
+	}
+	c, err := NewClient(t, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	defer c.Close()
+
+	require.Equal(t, backoffWaitBetween, c.cfg.BackoffWaitBetween)
+}
+
+func TestBackoffJitterFraction(t *testing.T) {
+	backoffJitterFraction := float64(0.9)
+	cfg := Config{
+		Endpoints:             []string{"127.0.0.1:12345"},
+		BackoffJitterFraction: backoffJitterFraction,
+	}
+	c, err := NewClient(t, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	defer c.Close()
+
+	require.InDelta(t, backoffJitterFraction, c.cfg.BackoffJitterFraction, 0.01)
+}
+
 func TestIsHaltErr(t *testing.T) {
-	assert.Equal(t,
-		isHaltErr(context.TODO(), errors.New("etcdserver: some etcdserver error")),
-		true,
+	assert.Truef(t,
+		isHaltErr(t.Context(), errors.New("etcdserver: some etcdserver error")),
 		"error created by errors.New should be unavailable error",
 	)
-	assert.Equal(t,
-		isHaltErr(context.TODO(), rpctypes.ErrGRPCStopped),
-		false,
-		fmt.Sprintf(`error "%v" should not be halt error`, rpctypes.ErrGRPCStopped),
+	assert.Falsef(t,
+		isHaltErr(t.Context(), rpctypes.ErrGRPCStopped),
+		`error "%v" should not be halt error`, rpctypes.ErrGRPCStopped,
 	)
-	assert.Equal(t,
-		isHaltErr(context.TODO(), rpctypes.ErrGRPCNoLeader),
-		false,
-		fmt.Sprintf(`error "%v" should not be halt error`, rpctypes.ErrGRPCNoLeader),
+	assert.Falsef(t,
+		isHaltErr(t.Context(), rpctypes.ErrGRPCNoLeader),
+		`error "%v" should not be halt error`, rpctypes.ErrGRPCNoLeader,
 	)
-	ctx, cancel := context.WithCancel(context.TODO())
-	assert.Equal(t,
+	ctx, cancel := context.WithCancel(t.Context())
+	assert.Falsef(t,
 		isHaltErr(ctx, nil),
-		false,
 		"no error and active context should be halt error",
 	)
 	cancel()
-	assert.Equal(t,
+	assert.Truef(t,
 		isHaltErr(ctx, nil),
-		true,
-		"cancel on context should be halte error",
+		"cancel on context should be halt error",
 	)
 }
 
 func TestIsUnavailableErr(t *testing.T) {
-	assert.Equal(t,
-		isUnavailableErr(context.TODO(), errors.New("etcdserver: some etcdserver error")),
-		false,
+	assert.Falsef(t,
+		isUnavailableErr(t.Context(), errors.New("etcdserver: some etcdserver error")),
 		"error created by errors.New should not be unavailable error",
 	)
-	assert.Equal(t,
-		isUnavailableErr(context.TODO(), rpctypes.ErrGRPCStopped),
-		true,
-		fmt.Sprintf(`error "%v" should be unavailable error`, rpctypes.ErrGRPCStopped),
+	assert.Truef(t,
+		isUnavailableErr(t.Context(), rpctypes.ErrGRPCStopped),
+		`error "%v" should be unavailable error`, rpctypes.ErrGRPCStopped,
 	)
-	assert.Equal(t,
-		isUnavailableErr(context.TODO(), rpctypes.ErrGRPCNotCapable),
-		false,
-		fmt.Sprintf("error %v should not be unavailable error", rpctypes.ErrGRPCNotCapable),
+	assert.Falsef(t,
+		isUnavailableErr(t.Context(), rpctypes.ErrGRPCNotCapable),
+		"error %v should not be unavailable error", rpctypes.ErrGRPCNotCapable,
 	)
-	ctx, cancel := context.WithCancel(context.TODO())
-	assert.Equal(t,
+	ctx, cancel := context.WithCancel(t.Context())
+	assert.Falsef(t,
 		isUnavailableErr(ctx, nil),
-		false,
 		"no error and active context should not be unavailable error",
 	)
 	cancel()
-	assert.Equal(t,
+	assert.Falsef(t,
 		isUnavailableErr(ctx, nil),
-		false,
 		"cancel on context should not be unavailable error",
 	)
 }
 
 func TestCloseCtxClient(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	c := NewCtxClient(ctx)
 	err := c.Close()
 	// Close returns ctx.toErr, a nil error means an open Done channel
@@ -227,7 +255,7 @@ func TestCloseCtxClient(t *testing.T) {
 }
 
 func TestWithLogger(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	c := NewCtxClient(ctx)
 	if c.lg == nil {
 		t.Errorf("unexpected nil in *zap.Logger")
@@ -240,7 +268,7 @@ func TestWithLogger(t *testing.T) {
 }
 
 func TestZapWithLogger(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	lg := zap.NewNop()
 	c := NewCtxClient(ctx, WithZapLogger(lg))
 
@@ -257,9 +285,7 @@ func TestAuthTokenBundleNoOverwrite(t *testing.T) {
 
 	// Create a mock AuthServer to handle Authenticate RPCs.
 	lis, err := net.Listen("unix", "etcd-auth-test:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer lis.Close()
 	addr := "unix://" + lis.Addr().String()
 	srv := grpc.NewServer()
@@ -275,24 +301,89 @@ func TestAuthTokenBundleNoOverwrite(t *testing.T) {
 		Username:    "foo",
 		Password:    "bar",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer c.Close()
 	oldTokenBundle := c.authTokenBundle
 
 	// Call the public Dial again, which should preserve the original
 	// authTokenBundle.
 	gc, err := c.Dial(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer gc.Close()
 	newTokenBundle := c.authTokenBundle
 
 	if oldTokenBundle != newTokenBundle {
 		t.Error("Client.authTokenBundle has been overwritten during Client.Dial")
 	}
+}
+
+func TestNewWithOnlyJWT(t *testing.T) {
+	// This call in particular changes working directory to the tmp dir of
+	// the test. The `etcd-auth-test:1` can be created in local directory,
+	// not exceeding the longest allowed path on OsX.
+	testutil.BeforeTest(t)
+
+	// Create a mock AuthServer to handle Authenticate RPCs.
+	lis, err := net.Listen("unix", "etcd-auth-test:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	addr := "unix://" + lis.Addr().String()
+	srv := grpc.NewServer()
+	// Having a token removes the need to ever call Authenticate on the
+	// server. If that happens then this will cause a connection failure.
+	etcdserverpb.RegisterAuthServer(srv, mockFailingAuthServer{})
+	go srv.Serve(lis)
+	defer srv.Stop()
+
+	c, err := NewClient(t, Config{
+		DialTimeout: 5 * time.Second,
+		Endpoints:   []string{addr},
+		Token:       "foo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	meta, err := c.authTokenBundle.PerRPCCredentials().GetRequestMetadata(t.Context(), "")
+	if err != nil {
+		t.Errorf("Error building request metadata: %s", err)
+	}
+
+	if tok, ok := meta[rpctypes.TokenFieldNameGRPC]; !ok {
+		t.Error("Token was not successfully set in the auth bundle")
+	} else if tok != "foo" {
+		t.Errorf("Incorrect token set in auth bundle, got '%s', expected 'foo'", tok)
+	}
+}
+
+func TestNewOnlyJWTExclusivity(t *testing.T) {
+	testutil.BeforeTest(t)
+
+	// Create a mock AuthServer to handle Authenticate RPCs.
+	lis, err := net.Listen("unix", "etcd-auth-test:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	addr := "unix://" + lis.Addr().String()
+	srv := grpc.NewServer()
+	// Having a token removes the need to ever call Authenticate on the
+	// server. If that happens then this will cause a connection failure.
+	etcdserverpb.RegisterAuthServer(srv, mockFailingAuthServer{})
+	go srv.Serve(lis)
+	defer srv.Stop()
+
+	_, err = NewClient(t, Config{
+		DialTimeout: 5 * time.Second,
+		Endpoints:   []string{addr},
+		Token:       "foo",
+		Username:    "user",
+		Password:    "pass",
+	})
+	require.ErrorIs(t, ErrMutuallyExclusiveCfg, err)
 }
 
 func TestSyncFiltersMembers(t *testing.T) {
@@ -305,7 +396,7 @@ func TestSyncFiltersMembers(t *testing.T) {
 			{ID: 2, Name: "isStartedAndNotLearner", ClientURLs: []string{"http://254.0.0.3:12345"}, IsLearner: false},
 		},
 	}
-	c.Sync(context.Background())
+	c.Sync(t.Context())
 
 	endpoints := c.Endpoints()
 	if len(endpoints) != 1 || endpoints[0] != "http://254.0.0.3:12345" {
@@ -315,7 +406,7 @@ func TestSyncFiltersMembers(t *testing.T) {
 
 func TestMinSupportedVersion(t *testing.T) {
 	testutil.BeforeTest(t)
-	var tests = []struct {
+	tests := []struct {
 		name                string
 		currentVersion      semver.Version
 		minSupportedVersion semver.Version
@@ -356,7 +447,7 @@ func TestMinSupportedVersion(t *testing.T) {
 
 func TestClientRejectOldCluster(t *testing.T) {
 	testutil.BeforeTest(t)
-	var tests = []struct {
+	tests := []struct {
 		name          string
 		endpoints     []string
 		versions      []string
@@ -399,7 +490,7 @@ func TestClientRejectOldCluster(t *testing.T) {
 				endpointToVersion[tt.endpoints[j]] = tt.versions[j]
 			}
 			c := &Client{
-				ctx:       context.Background(),
+				ctx:       t.Context(),
 				endpoints: tt.endpoints,
 				epMu:      new(sync.RWMutex),
 				Maintenance: &mockMaintenance{
@@ -407,13 +498,11 @@ func TestClientRejectOldCluster(t *testing.T) {
 				},
 			}
 
-			if err := c.checkVersion(); err != tt.expectedError {
-				t.Errorf("heckVersion err:%v", err)
+			if err := c.checkVersion(); !errors.Is(err, tt.expectedError) {
+				t.Errorf("checkVersion err:%v", err)
 			}
 		})
-
 	}
-
 }
 
 type mockMaintenance struct {
@@ -454,6 +543,14 @@ func (mm mockMaintenance) MoveLeader(ctx context.Context, transfereeID uint64) (
 
 func (mm mockMaintenance) Downgrade(ctx context.Context, action DowngradeAction, version string) (*DowngradeResponse, error) {
 	return nil, nil
+}
+
+type mockFailingAuthServer struct {
+	*etcdserverpb.UnimplementedAuthServer
+}
+
+func (mockFailingAuthServer) Authenticate(context.Context, *etcdserverpb.AuthenticateRequest) (*etcdserverpb.AuthenticateResponse, error) {
+	return nil, errors.New("this auth server always fails")
 }
 
 type mockAuthServer struct {

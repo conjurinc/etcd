@@ -1,44 +1,51 @@
 module go.etcd.io/etcd/etcdctl/v3
 
-go 1.21
+go 1.25.0
+
+toolchain go1.25.3
 
 require (
-	github.com/bgentry/speakeasy v0.1.0
-	github.com/cheggaaa/pb/v3 v3.1.4
+	github.com/bgentry/speakeasy v0.2.0
+	github.com/cheggaaa/pb/v3 v3.1.7
 	github.com/dustin/go-humanize v1.0.1
-	github.com/olekukonko/tablewriter v0.0.5
-	github.com/spf13/cobra v1.7.0
-	github.com/spf13/pflag v1.0.5
+	github.com/olekukonko/tablewriter v1.1.0
+	github.com/spf13/cobra v1.10.1
+	github.com/spf13/pflag v1.0.10
+	github.com/stretchr/testify v1.11.1
 	go.etcd.io/etcd/api/v3 v3.6.0-alpha.0
 	go.etcd.io/etcd/client/pkg/v3 v3.6.0-alpha.0
 	go.etcd.io/etcd/client/v3 v3.6.0-alpha.0
 	go.etcd.io/etcd/pkg/v3 v3.6.0-alpha.0
-	go.uber.org/zap v1.26.0
-	golang.org/x/time v0.3.0
-	google.golang.org/grpc v1.59.0
+	go.uber.org/zap v1.27.0
+	golang.org/x/time v0.14.0
+	google.golang.org/grpc v1.75.1
 )
 
 require (
 	github.com/VividCortex/ewma v1.2.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
-	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
-	github.com/fatih/color v1.15.0 // indirect
+	github.com/coreos/go-systemd/v22 v22.6.0 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/fatih/color v1.18.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/protobuf v1.5.3 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.18.0 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
-	github.com/mattn/go-isatty v0.0.19 // indirect
-	github.com/mattn/go-runewidth v0.0.15 // indirect
-	github.com/rivo/uniseg v0.2.0 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-runewidth v0.0.16 // indirect
+	github.com/olekukonko/errors v1.1.0 // indirect
+	github.com/olekukonko/ll v0.0.9 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/net v0.17.0 // indirect
-	golang.org/x/sys v0.13.0 // indirect
-	golang.org/x/text v0.13.0 // indirect
-	google.golang.org/genproto v0.0.0-20231002182017-d307bd883b97 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20230920204549-e6e6cdab5c13 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20231009173412-8bfb1ae86b6c // indirect
-	google.golang.org/protobuf v1.31.0 // indirect
+	golang.org/x/net v0.46.0 // indirect
+	golang.org/x/sys v0.37.0 // indirect
+	golang.org/x/text v0.30.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20250929231259-57b25ae835d4 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20251006185510-65f7160b3a87 // indirect
+	google.golang.org/protobuf v1.36.10 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace (
@@ -46,12 +53,4 @@ replace (
 	go.etcd.io/etcd/client/pkg/v3 => ../client/pkg
 	go.etcd.io/etcd/client/v3 => ../client/v3
 	go.etcd.io/etcd/pkg/v3 => ../pkg
-)
-
-// Bad imports are sometimes causing attempts to pull that code.
-// This makes the error more explicit.
-replace (
-	go.etcd.io/etcd => ./FORBIDDEN_DEPENDENCY
-	go.etcd.io/etcd/v3 => ./FORBIDDEN_DEPENDENCY
-	go.etcd.io/tests/v3 => ./FORBIDDEN_DEPENDENCY
 )

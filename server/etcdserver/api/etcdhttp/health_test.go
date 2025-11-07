@@ -23,9 +23,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap/zaptest"
-
-	"go.etcd.io/raft/v3"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
@@ -34,17 +33,27 @@ import (
 	"go.etcd.io/etcd/server/v3/config"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 	"go.etcd.io/etcd/server/v3/storage/schema"
+	"go.etcd.io/raft/v3"
 )
 
 type fakeHealthServer struct {
 	fakeServer
-	apiError      error
-	missingLeader bool
-	authStore     auth.AuthStore
+	serializableReadError error
+	linearizableReadError error
+	missingLeader         bool
+	authStore             auth.AuthStore
+	isLearner             bool
 }
 
-func (s *fakeHealthServer) Range(_ context.Context, _ *pb.RangeRequest) (*pb.RangeResponse, error) {
-	return nil, s.apiError
+func (s *fakeHealthServer) Range(_ context.Context, req *pb.RangeRequest) (*pb.RangeResponse, error) {
+	if req.Serializable {
+		return nil, s.serializableReadError
+	}
+	return nil, s.linearizableReadError
+}
+
+func (s *fakeHealthServer) IsLearner() bool {
+	return s.isLearner
 }
 
 func (s *fakeHealthServer) Config() config.ServerConfig {
@@ -72,6 +81,7 @@ type healthTestCase struct {
 	alarms        []*pb.AlarmMember
 	apiError      error
 	missingLeader bool
+	isLearner     bool
 }
 
 func TestHealthHandler(t *testing.T) {
@@ -147,19 +157,20 @@ func TestHealthHandler(t *testing.T) {
 			be, _ := betesting.NewDefaultTmpBackend(t)
 			defer betesting.Close(t, be)
 			HandleHealth(zaptest.NewLogger(t), mux, &fakeHealthServer{
-				fakeServer:    fakeServer{alarms: tt.alarms},
-				apiError:      tt.apiError,
-				missingLeader: tt.missingLeader,
-				authStore:     auth.NewAuthStore(lg, schema.NewAuthBackend(lg, be), nil, 0),
+				fakeServer:            fakeServer{alarms: tt.alarms},
+				serializableReadError: tt.apiError,
+				linearizableReadError: tt.apiError,
+				missingLeader:         tt.missingLeader,
+				authStore:             auth.NewAuthStore(lg, schema.NewAuthBackend(lg, be), nil, 0),
 			})
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
-			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, nil, nil)
+			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, nil, nil)
 		})
 	}
 }
 
-func TestHttpSubPath(t *testing.T) {
+func TestHTTPSubPath(t *testing.T) {
 	be, _ := betesting.NewDefaultTmpBackend(t)
 	defer betesting.Close(t, be)
 	tests := []healthTestCase{
@@ -176,6 +187,11 @@ func TestHttpSubPath(t *testing.T) {
 			notInResult:      []string{"data_corruption"},
 		},
 		{
+			name:             "/readyz/learner ok",
+			healthCheckURL:   "/readyz/non_learner",
+			expectStatusCode: http.StatusOK,
+		},
+		{
 			name:             "/readyz/non_exist 404",
 			healthCheckURL:   "/readyz/non_exist",
 			expectStatusCode: http.StatusNotFound,
@@ -186,13 +202,14 @@ func TestHttpSubPath(t *testing.T) {
 			mux := http.NewServeMux()
 			logger := zaptest.NewLogger(t)
 			s := &fakeHealthServer{
-				apiError:  tt.apiError,
-				authStore: auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+				serializableReadError: tt.apiError,
+				authStore:             auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
 			}
 			HandleHealth(logger, mux, s)
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
-			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkMetrics(t, tt.healthCheckURL, "", tt.expectStatusCode)
 		})
 	}
 }
@@ -246,10 +263,10 @@ func TestDataCorruptionCheck(t *testing.T) {
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
 			// OK before alarms are activated.
-			checkHttpResponse(t, ts, tt.healthCheckURL, http.StatusOK, nil, nil)
+			checkHTTPResponse(t, ts, tt.healthCheckURL, http.StatusOK, nil, nil)
 			// Activate the alarms.
 			s.alarms = tt.alarms
-			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
 		})
 	}
 }
@@ -269,14 +286,14 @@ func TestSerializableReadCheck(t *testing.T) {
 			healthCheckURL:   "/livez",
 			apiError:         fmt.Errorf("Unexpected error"),
 			expectStatusCode: http.StatusServiceUnavailable,
-			inResult:         []string{"[-]serializable_read failed: range error: Unexpected error"},
+			inResult:         []string{"[-]serializable_read failed: Unexpected error"},
 		},
 		{
 			name:             "Not ready if range api is not available",
 			healthCheckURL:   "/readyz",
 			apiError:         fmt.Errorf("Unexpected error"),
 			expectStatusCode: http.StatusServiceUnavailable,
-			inResult:         []string{"[-]serializable_read failed: range error: Unexpected error"},
+			inResult:         []string{"[-]serializable_read failed: Unexpected error"},
 		},
 	}
 	for _, tt := range tests {
@@ -284,20 +301,97 @@ func TestSerializableReadCheck(t *testing.T) {
 			mux := http.NewServeMux()
 			logger := zaptest.NewLogger(t)
 			s := &fakeHealthServer{
-				apiError:  tt.apiError,
-				authStore: auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+				serializableReadError: tt.apiError,
+				authStore:             auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
 			}
 			HandleHealth(logger, mux, s)
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
-			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkMetrics(t, tt.healthCheckURL, "serializable_read", tt.expectStatusCode)
 		})
 	}
 }
 
-func checkHttpResponse(t *testing.T, ts *httptest.Server, url string, expectStatusCode int, inResult []string, notInResult []string) {
-	res, err := ts.Client().Do(&http.Request{Method: http.MethodGet, URL: testutil.MustNewURL(t, ts.URL+url)})
+func TestLinearizableReadCheck(t *testing.T) {
+	be, _ := betesting.NewDefaultTmpBackend(t)
+	defer betesting.Close(t, be)
+	tests := []healthTestCase{
+		{
+			name:             "Alive normal",
+			healthCheckURL:   "/livez?verbose",
+			expectStatusCode: http.StatusOK,
+			inResult:         []string{"[+]serializable_read ok"},
+		},
+		{
+			name:             "Alive if lineariable range api is not available",
+			healthCheckURL:   "/livez",
+			apiError:         fmt.Errorf("Unexpected error"),
+			expectStatusCode: http.StatusOK,
+		},
+		{
+			name:             "Not ready if range api is not available",
+			healthCheckURL:   "/readyz",
+			apiError:         fmt.Errorf("Unexpected error"),
+			expectStatusCode: http.StatusServiceUnavailable,
+			inResult:         []string{"[+]serializable_read ok", "[-]linearizable_read failed: Unexpected error"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			logger := zaptest.NewLogger(t)
+			s := &fakeHealthServer{
+				linearizableReadError: tt.apiError,
+				authStore:             auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+			}
+			HandleHealth(logger, mux, s)
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkMetrics(t, tt.healthCheckURL, "linearizable_read", tt.expectStatusCode)
+		})
+	}
+}
 
+func TestLearnerReadyCheck(t *testing.T) {
+	be, _ := betesting.NewDefaultTmpBackend(t)
+	defer betesting.Close(t, be)
+	tests := []healthTestCase{
+		{
+			name:             "readyz normal",
+			healthCheckURL:   "/readyz",
+			expectStatusCode: http.StatusOK,
+			isLearner:        false,
+		},
+		{
+			name:             "not ready because member is learner",
+			healthCheckURL:   "/readyz",
+			expectStatusCode: http.StatusServiceUnavailable,
+			isLearner:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			logger := zaptest.NewLogger(t)
+			s := &fakeHealthServer{
+				linearizableReadError: tt.apiError,
+				authStore:             auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+			}
+			s.isLearner = tt.isLearner
+			HandleHealth(logger, mux, s)
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkMetrics(t, tt.healthCheckURL, "linearizable_read", tt.expectStatusCode)
+		})
+	}
+}
+
+func checkHTTPResponse(t *testing.T, ts *httptest.Server, url string, expectStatusCode int, inResult []string, notInResult []string) {
+	res, err := ts.Client().Do(&http.Request{Method: http.MethodGet, URL: testutil.MustNewURL(t, ts.URL+url)})
 	if err != nil {
 		t.Fatalf("fail serve http request %s %v", url, err)
 	}
@@ -320,6 +414,57 @@ func checkHttpResponse(t *testing.T, ts *httptest.Server, url string, expectStat
 		if strings.Contains(result, substr) {
 			t.Errorf("Do not expect substring : %s, in response: %s", substr, result)
 			return
+		}
+	}
+}
+
+func checkMetrics(t *testing.T, url, checkName string, expectStatusCode int) {
+	defer healthCheckGauge.Reset()
+	defer healthCheckCounter.Reset()
+
+	typeName := strings.TrimPrefix(strings.Split(url, "?")[0], "/")
+	if len(checkName) == 0 {
+		checkName = strings.Split(typeName, "/")[1]
+		typeName = strings.Split(typeName, "/")[0]
+	}
+
+	expectedSuccessCount := 1
+	expectedErrorCount := 0
+	if expectStatusCode != http.StatusOK {
+		expectedSuccessCount = 0
+		expectedErrorCount = 1
+	}
+
+	gather, _ := prometheus.DefaultGatherer.Gather()
+	for _, mf := range gather {
+		name := *mf.Name
+		val := 0
+		switch name {
+		case "etcd_server_healthcheck":
+			val = int(mf.GetMetric()[0].GetGauge().GetValue())
+		case "etcd_server_healthcheck_total":
+			val = int(mf.GetMetric()[0].GetCounter().GetValue())
+		default:
+			continue
+		}
+		labelMap := make(map[string]string)
+		for _, label := range mf.GetMetric()[0].Label {
+			labelMap[label.GetName()] = label.GetValue()
+		}
+		if typeName != labelMap["type"] {
+			continue
+		}
+		if labelMap["name"] != checkName {
+			continue
+		}
+		if statusLabel, found := labelMap["status"]; found && statusLabel == HealthStatusError {
+			if val != expectedErrorCount {
+				t.Fatalf("%s got errorCount %d, wanted %d\n", name, val, expectedErrorCount)
+			}
+		} else {
+			if val != expectedSuccessCount {
+				t.Fatalf("%s got expectedSuccessCount %d, wanted %d\n", name, val, expectedSuccessCount)
+			}
 		}
 	}
 }

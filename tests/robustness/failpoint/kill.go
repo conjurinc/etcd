@@ -20,19 +20,21 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
+	"go.etcd.io/etcd/tests/v3/robustness/identity"
+	"go.etcd.io/etcd/tests/v3/robustness/report"
+	"go.etcd.io/etcd/tests/v3/robustness/traffic"
 )
 
-var (
-	KillFailpoint Failpoint = killFailpoint{}
-)
+var KillFailpoint Failpoint = killFailpoint{}
 
 type killFailpoint struct{}
 
-func (f killFailpoint) Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster) error {
+func (f killFailpoint) Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster, baseTime time.Time, ids identity.Provider) ([]report.ClientReport, error) {
 	member := clus.Procs[rand.Int()%len(clus.Procs)]
 
 	for member.IsRunning() {
@@ -43,27 +45,27 @@ func (f killFailpoint) Inject(ctx context.Context, t *testing.T, lg *zap.Logger,
 		err = member.Wait(ctx)
 		if err != nil && !strings.Contains(err.Error(), "unexpected exit code") {
 			lg.Info("Failed to kill the process", zap.Error(err))
-			return fmt.Errorf("failed to kill the process within %s, err: %w", triggerTimeout, err)
+			return nil, fmt.Errorf("failed to kill the process within %s, err: %w", triggerTimeout, err)
 		}
 	}
 	if lazyfs := member.LazyFS(); lazyfs != nil {
 		lg.Info("Removing data that was not fsynced")
 		err := lazyfs.ClearCache(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	err := member.Start(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return nil, nil
 }
 
 func (f killFailpoint) Name() string {
 	return "Kill"
 }
 
-func (f killFailpoint) Available(e2e.EtcdProcessClusterConfig, e2e.EtcdProcess) bool {
+func (f killFailpoint) Available(e2e.EtcdProcessClusterConfig, e2e.EtcdProcess, traffic.Profile) bool {
 	return true
 }

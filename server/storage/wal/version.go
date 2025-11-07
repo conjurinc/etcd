@@ -29,9 +29,15 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 )
 
+// Version defines the wal version interface.
+type Version interface {
+	// MinimalEtcdVersion returns minimal etcd version able to interpret WAL log.
+	MinimalEtcdVersion() *semver.Version
+}
+
 // ReadWALVersion reads remaining entries from opened WAL and returns struct
 // that implements schema.WAL interface.
-func ReadWALVersion(w *WAL) (*walVersion, error) {
+func ReadWALVersion(w *WAL) (Version, error) {
 	_, _, ents, err := w.ReadAll()
 	if err != nil {
 		return nil, err
@@ -112,8 +118,8 @@ func visitEntryData(entryType raftpb.EntryType, data []byte, visitor Visitor) er
 			break
 		}
 		msg = proto.MessageReflect(&raftReq)
-		if raftReq.ClusterVersionSet != nil {
-			ver, err := semver.NewVersion(raftReq.ClusterVersionSet.Ver)
+		if raftReq.DowngradeVersionTest != nil {
+			ver, err := semver.NewVersion(raftReq.DowngradeVersionTest.Ver)
 			if err != nil {
 				return err
 			}
@@ -187,10 +193,7 @@ func visitMessage(m protoreflect.Message, visitor Visitor) error {
 		case protoreflect.EnumNumber:
 			err = visitEnumNumber(fd.Enum(), m, visitor)
 		}
-		if err != nil {
-			return false
-		}
-		return true
+		return err == nil
 	})
 	return err
 }
@@ -243,7 +246,7 @@ func visitDescriptor(md protoreflect.Descriptor, visitor Visitor) error {
 	}
 	ver, err := etcdVersionFromOptionsString(opts.String())
 	if err != nil {
-		return fmt.Errorf("%s: %s", md.FullName(), err)
+		return fmt.Errorf("%s: %w", md.FullName(), err)
 	}
 	return visitor(md.FullName(), ver)
 }

@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -euo pipefail
 
@@ -13,10 +26,12 @@ GOARCH=${GOARCH:-$(go env GOARCH)}
 
 GO_BUILD_FLAGS=${GO_BUILD_FLAGS:-}
 
+CGO_ENABLED="${CGO_ENABLED:-0}"
+
 # Set GO_LDFLAGS="-s" for building without symbols for debugging.
 # shellcheck disable=SC2206
 GO_LDFLAGS=(${GO_LDFLAGS:-} "-X=${VERSION_SYMBOL}=${GIT_SHA}")
-GO_BUILD_ENV=("CGO_ENABLED=0" "GO_BUILD_FLAGS=${GO_BUILD_FLAGS}" "GOOS=${GOOS}" "GOARCH=${GOARCH}")
+GO_BUILD_ENV=("CGO_ENABLED=${CGO_ENABLED}" "GO_BUILD_FLAGS=${GO_BUILD_FLAGS}" "GOOS=${GOOS}" "GOARCH=${GOARCH}")
 
 etcd_build() {
   out="bin"
@@ -80,7 +95,7 @@ tools_build() {
     echo "Building" "'${tool}'"...
     run rm -f "${out}/${tool}"
     # shellcheck disable=SC2086
-    run env GO_BUILD_FLAGS="${GO_BUILD_FLAGS}" CGO_ENABLED=0 go build ${GO_BUILD_FLAGS} \
+    run env GO_BUILD_FLAGS="${GO_BUILD_FLAGS}" CGO_ENABLED=${CGO_ENABLED} go build ${GO_BUILD_FLAGS} \
       -trimpath \
       -installsuffix=cgo \
       "-ldflags=${GO_LDFLAGS[*]}" \

@@ -15,6 +15,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -30,6 +31,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -83,7 +85,8 @@ type v3Manager struct {
 	snapDir   string
 	cl        *membership.RaftCluster
 
-	skipHashCheck bool
+	skipHashCheck   bool
+	initialMmapSize uint64
 }
 
 // hasChecksum returns "true" if the file size "n"
@@ -116,13 +119,14 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		return ds, err
 	}
 
-	db, err := bolt.Open(dbPath, 0400, &bolt.Options{ReadOnly: true})
+	db, err := bolt.Open(dbPath, 0o400, &bolt.Options{ReadOnly: true})
 	if err != nil {
 		return ds, err
 	}
 	defer db.Close()
 
 	h := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	seenKeys := make(map[string]struct{})
 
 	if err = db.View(func(tx *bolt.Tx) error {
 		// check snapshot file integrity first
@@ -142,27 +146,47 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		for next, _ := c.First(); next != nil; next, _ = c.Next() {
 			b := tx.Bucket(next)
 			if b == nil {
-				return fmt.Errorf("cannot get hash of bucket %s", string(next))
+				return fmt.Errorf("nil bucket: %q", string(next))
 			}
-			if _, err = h.Write(next); err != nil {
-				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
+			_, err = h.Write(next)
+			if err != nil {
+				return fmt.Errorf("cannot hash bucket name: %q err: %w", string(next), err)
 			}
-			iskeyb := (string(next) == "key")
+
+			iskeyb := (bytes.Equal(next, schema.Key.Name()))
 			if err = b.ForEach(func(k, v []byte) error {
-				if _, herr := h.Write(k); herr != nil {
-					return fmt.Errorf("cannot write to bucket %s", herr.Error())
+				_, err = h.Write(k)
+				if err != nil {
+					return fmt.Errorf("cannot hash bucket key: %q err: %w", k, err)
 				}
-				if _, herr := h.Write(v); herr != nil {
-					return fmt.Errorf("cannot write to bucket %s", herr.Error())
+				_, err = h.Write(v)
+				if err != nil {
+					return fmt.Errorf("cannot hash bucket key: %q value: %q err: %w", k, v, err)
 				}
 				if iskeyb {
-					rev := mvcc.BytesToRev(k)
+					var rev mvcc.Revision
+					rev, err = bytesToRev(k)
+					if err != nil {
+						return fmt.Errorf("cannot parse revision key: %q err: %w", k, err)
+					}
 					ds.Revision = rev.Main
+
+					var kv mvccpb.KeyValue
+					err = kv.Unmarshal(v)
+					if err != nil {
+						return fmt.Errorf("cannot unmarshal value, key: %q value: %q err: %w", k, v, err)
+					}
+					key := string(kv.Key)
+					// refer to https://etcd.io/docs/v3.5/learning/data_model/
+					if !mvcc.IsTombstone(k) {
+						seenKeys[key] = struct{}{}
+					} else {
+						delete(seenKeys, key)
+					}
 				}
-				ds.TotalKey++
 				return nil
 			}); err != nil {
-				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
+				return fmt.Errorf("error during bucket key iteration, name: %q err: %w", string(next), err)
 			}
 		}
 		return nil
@@ -170,8 +194,18 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		return ds, err
 	}
 
+	ds.TotalKey = len(seenKeys)
 	ds.Hash = h.Sum32()
 	return ds, nil
+}
+
+func bytesToRev(b []byte) (rev mvcc.Revision, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%s", r)
+		}
+	}()
+	return mvcc.BytesToRev(b), err
 }
 
 // RestoreConfig configures snapshot restore operation.
@@ -203,6 +237,9 @@ type RestoreConfig struct {
 	// SkipHashCheck is "true" to ignore snapshot integrity hash value
 	// (required if copied from data directory).
 	SkipHashCheck bool
+
+	// InitialMmapSize is the database initial memory map size.
+	InitialMmapSize uint64
 
 	// RevisionBump is the amount to increase the latest revision after restore,
 	// to allow administrators to trick clients into thinking that revision never decreased.
@@ -263,6 +300,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 	s.walDir = walDir
 	s.snapDir = filepath.Join(dataDir, "member", "snap")
 	s.skipHashCheck = cfg.SkipHashCheck
+	s.initialMmapSize = cfg.InitialMmapSize
 
 	s.lg.Info(
 		"restoring snapshot",
@@ -270,6 +308,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 		zap.String("wal-dir", s.walDir),
 		zap.String("data-dir", dataDir),
 		zap.String("snap-dir", s.snapDir),
+		zap.Uint64("initial-memory-map-size", s.initialMmapSize),
 	)
 
 	if err = s.saveDB(); err != nil {
@@ -297,6 +336,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 		zap.String("wal-dir", s.walDir),
 		zap.String("data-dir", dataDir),
 		zap.String("snap-dir", s.snapDir),
+		zap.Uint64("initial-memory-map-size", s.initialMmapSize),
 	)
 
 	return verify.VerifyIfEnabled(verify.Config{
@@ -317,7 +357,7 @@ func (s *v3Manager) saveDB() error {
 		return err
 	}
 
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	err = schema.NewMembershipBackend(s.lg, be).TrimMembershipFromBackend()
@@ -417,7 +457,7 @@ func (s *v3Manager) copyAndVerifyDB() error {
 
 	outDbPath := s.outDbPath()
 
-	db, dberr := os.OpenFile(outDbPath, os.O_RDWR|os.O_CREATE, 0600)
+	db, dberr := os.OpenFile(outDbPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if dberr != nil {
 		return dberr
 	}
@@ -472,7 +512,7 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 	}
 
 	// add members again to persist them to the backend we create.
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 	s.cl.SetBackend(schema.NewMembershipBackend(s.lg, be))
 	for _, m := range s.cl.Members() {
@@ -551,7 +591,7 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 }
 
 func (s *v3Manager) updateCIndex(commit uint64, term uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	cindex.UpdateConsistentIndexForce(be.BatchTx(), commit, term)

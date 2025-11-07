@@ -32,16 +32,18 @@ import (
 func TestCtlV3AuthCertCN(t *testing.T) {
 	testCtl(t, authTestCertCN, withCfg(*e2e.NewConfigClientTLSCertAuth()))
 }
+
 func TestCtlV3AuthCertCNAndUsername(t *testing.T) {
 	testCtl(t, authTestCertCNAndUsername, withCfg(*e2e.NewConfigClientTLSCertAuth()))
 }
+
 func TestCtlV3AuthCertCNAndUsernameNoPassword(t *testing.T) {
 	testCtl(t, authTestCertCNAndUsernameNoPassword, withCfg(*e2e.NewConfigClientTLSCertAuth()))
 }
 
 func TestCtlV3AuthCertCNWithWithConcurrentOperation(t *testing.T) {
 	e2e.BeforeTest(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	// apply the certificate which has `root` CommonName,

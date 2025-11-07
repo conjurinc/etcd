@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -45,9 +44,7 @@ func TestCurlV3_MaxStreams_BelowLimit_NoTLS_Medium(t *testing.T) {
 
 func TestCurlV3_MaxStreamsNoTLS_BelowLimit_Large(t *testing.T) {
 	f, err := setRLimit(10240)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer f()
 	testCurlV3MaxStream(t, false, withCfg(*e2e.NewConfigNoTLS()), withMaxConcurrentStreams(1000), withTestTimeout(200*time.Second))
 }
@@ -91,10 +88,8 @@ func testCurlV3MaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
 
 	// Step 2: create the cluster
 	t.Log("Creating an etcd cluster")
-	epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t, e2e.WithConfig(&cx.cfg))
-	if err != nil {
-		t.Fatalf("Failed to start etcd cluster: %v", err)
-	}
+	epc, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(&cx.cfg))
+	require.NoErrorf(t, err, "Failed to start etcd cluster")
 	cx.epc = epc
 	cx.dataDir = epc.Procs[0].Config().DataDirPath
 
@@ -119,7 +114,7 @@ func testCurlV3MaxStream(t *testing.T, reachLimit bool, opts ...ctlOption) {
 	// Step 4: Close the cluster
 	t.Log("Closing test cluster...")
 	close(closeServerCh)
-	assert.NoError(t, epc.Close())
+	require.NoError(t, epc.Close())
 	t.Log("Closed test cluster")
 
 	// Step 5: Waiting all watch goroutines to exit.
@@ -147,9 +142,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 			Key: []byte("foo"),
 		},
 	})
-	if err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, err)
 
 	var wgSchedule sync.WaitGroup
 
@@ -169,7 +162,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 		expectedLine := `"created":true}}`
 		_, lerr := proc.ExpectWithContext(context.TODO(), expect.ExpectedResponse{Value: expectedLine})
 		if lerr != nil {
-			return fmt.Errorf("%v %v (expected %q). Try EXPECT_DEBUG=TRUE", args, lerr, expectedLine)
+			return fmt.Errorf("%v %w (expected %q). Try EXPECT_DEBUG=TRUE", args, lerr, expectedLine)
 		}
 
 		wgSchedule.Done()
@@ -182,7 +175,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 		case <-closeCh:
 		default:
 			// perr could be nil.
-			return fmt.Errorf("unexpected connection close before server closes: %v", perr)
+			return fmt.Errorf("unexpected connection close before server closes: %w", perr)
 		}
 		return nil
 	}
@@ -194,9 +187,7 @@ func submitConcurrentWatch(cx ctlCtx, number int, wgDone *sync.WaitGroup, closeC
 			go func(i int) {
 				defer wgDone.Done()
 
-				if err := createWatchConnection(); err != nil {
-					cx.t.Fatalf("testCurlV3MaxStream watch failed: %d, error: %v", i, err)
-				}
+				require.NoErrorf(cx.t, createWatchConnection(), "testCurlV3MaxStream watch failed: %d", i)
 			}(i)
 		}
 
@@ -209,9 +200,7 @@ func submitRangeAfterConcurrentWatch(cx ctlCtx, expectedValue string) {
 	rangeData, err := json.Marshal(&pb.RangeRequest{
 		Key: []byte("foo"),
 	})
-	if err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, err)
 
 	cx.t.Log("Submitting range request...")
 	if err := e2e.CURLPost(cx.epc, e2e.CURLReq{Endpoint: "/v3/kv/range", Value: string(rangeData), Expected: expect.ExpectedResponse{Value: expectedValue}, Timeout: 5}); err != nil {
@@ -225,19 +214,19 @@ func submitRangeAfterConcurrentWatch(cx ctlCtx, expectedValue string) {
 func setRLimit(nofile uint64) (func() error, error) {
 	var rLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-		return nil, fmt.Errorf("failed to get open file limit, error: %v", err)
+		return nil, fmt.Errorf("failed to get open file limit, error: %w", err)
 	}
 
 	var wLimit syscall.Rlimit
 	wLimit.Max = nofile
 	wLimit.Cur = nofile
 	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &wLimit); err != nil {
-		return nil, fmt.Errorf("failed to set max open file limit, %v", err)
+		return nil, fmt.Errorf("failed to set max open file limit, %w", err)
 	}
 
 	return func() error {
 		if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-			return fmt.Errorf("failed reset max open file limit, %v", err)
+			return fmt.Errorf("failed reset max open file limit, %w", err)
 		}
 		return nil
 	}, nil

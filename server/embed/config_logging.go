@@ -34,7 +34,7 @@ import (
 )
 
 // GetLogger returns the logger.
-func (cfg Config) GetLogger() *zap.Logger {
+func (cfg *Config) GetLogger() *zap.Logger {
 	cfg.loggerMu.RLock()
 	l := cfg.logger
 	cfg.loggerMu.RUnlock()
@@ -165,35 +165,44 @@ func (cfg *Config) setupLogging() error {
 			return err
 		}
 
-		logTLSHandshakeFailure := func(conn *tls.Conn, err error) {
-			state := conn.ConnectionState()
-			remoteAddr := conn.RemoteAddr().String()
-			serverName := state.ServerName
-			if len(state.PeerCertificates) > 0 {
-				cert := state.PeerCertificates[0]
-				ips := make([]string, len(cert.IPAddresses))
-				for i := range cert.IPAddresses {
-					ips[i] = cert.IPAddresses[i].String()
+		logTLSHandshakeFailureFunc := func(msg string) func(conn *tls.Conn, err error) {
+			return func(conn *tls.Conn, err error) {
+				// Log EOF errors on DEBUG not to spam logs too much.
+				logFunc := cfg.logger.Warn
+				if errors.Is(err, io.EOF) {
+					logFunc = cfg.logger.Debug
 				}
-				cfg.logger.Warn(
-					"rejected connection",
-					zap.String("remote-addr", remoteAddr),
-					zap.String("server-name", serverName),
-					zap.Strings("ip-addresses", ips),
-					zap.Strings("dns-names", cert.DNSNames),
-					zap.Error(err),
-				)
-			} else {
-				cfg.logger.Warn(
-					"rejected connection",
-					zap.String("remote-addr", remoteAddr),
-					zap.String("server-name", serverName),
-					zap.Error(err),
-				)
+
+				state := conn.ConnectionState()
+				remoteAddr := conn.RemoteAddr().String()
+				serverName := state.ServerName
+				if len(state.PeerCertificates) > 0 {
+					cert := state.PeerCertificates[0]
+					ips := make([]string, len(cert.IPAddresses))
+					for i := range cert.IPAddresses {
+						ips[i] = cert.IPAddresses[i].String()
+					}
+					logFunc(
+						msg,
+						zap.String("remote-addr", remoteAddr),
+						zap.String("server-name", serverName),
+						zap.Strings("ip-addresses", ips),
+						zap.Strings("dns-names", cert.DNSNames),
+						zap.Error(err),
+					)
+				} else {
+					logFunc(
+						msg,
+						zap.String("remote-addr", remoteAddr),
+						zap.String("server-name", serverName),
+						zap.Error(err),
+					)
+				}
 			}
 		}
-		cfg.ClientTLSInfo.HandshakeFailure = logTLSHandshakeFailure
-		cfg.PeerTLSInfo.HandshakeFailure = logTLSHandshakeFailure
+
+		cfg.ClientTLSInfo.HandshakeFailure = logTLSHandshakeFailureFunc("rejected connection on client endpoint")
+		cfg.PeerTLSInfo.HandshakeFailure = logTLSHandshakeFailureFunc("rejected connection on peer endpoint")
 
 	default:
 		return fmt.Errorf("unknown logger option %q", cfg.Logger)
@@ -211,12 +220,6 @@ func NewZapLoggerBuilder(lg *zap.Logger) func(*Config) error {
 		cfg.logger = lg
 		return nil
 	}
-}
-
-// NewZapCoreLoggerBuilder - is a deprecated setter for the logger.
-// Deprecated: Use simpler NewZapLoggerBuilder. To be removed in etcd-3.6.
-func NewZapCoreLoggerBuilder(lg *zap.Logger, _ zapcore.Core, _ zapcore.WriteSyncer) func(*Config) error {
-	return NewZapLoggerBuilder(lg)
 }
 
 // SetupGlobalLoggers configures 'global' loggers (grpc, zapGlobal) based on the cfg.
@@ -270,11 +273,11 @@ func setupLogRotation(logOutputs []string, logRotateConfigJSON string) error {
 		var syntaxError *json.SyntaxError
 		switch {
 		case errors.As(err, &syntaxError):
-			return fmt.Errorf("improperly formatted log rotation config: %v", err)
+			return fmt.Errorf("improperly formatted log rotation config: %w", err)
 		case errors.As(err, &unmarshalTypeError):
-			return fmt.Errorf("invalid log rotation config: %v", err)
+			return fmt.Errorf("invalid log rotation config: %w", err)
 		default:
-			return fmt.Errorf("fail to unmarshal log rotation config: %v", err)
+			return fmt.Errorf("fail to unmarshal log rotation config: %w", err)
 		}
 	}
 	zap.RegisterSink("rotate", func(u *url.URL) (zap.Sink, error) {

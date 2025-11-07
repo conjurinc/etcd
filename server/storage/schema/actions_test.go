@@ -15,11 +15,13 @@
 package schema
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/server/v3/storage/backend"
@@ -70,9 +72,7 @@ func TestActionIsReversible(t *testing.T) {
 			be, _ := betesting.NewTmpBackend(t, time.Microsecond, 10)
 			defer be.Close()
 			tx := be.BatchTx()
-			if tx == nil {
-				t.Fatal("batch tx is nil")
-			}
+			require.NotNilf(t, tx, "batch tx is nil")
 			tx.Lock()
 			defer tx.Unlock()
 			UnsafeCreateMetaBucket(tx)
@@ -127,15 +127,13 @@ func TestActionListRevert(t *testing.T) {
 			be, _ := betesting.NewTmpBackend(t, time.Microsecond, 10)
 			defer be.Close()
 			tx := be.BatchTx()
-			if tx == nil {
-				t.Fatal("batch tx is nil")
-			}
+			require.NotNilf(t, tx, "batch tx is nil")
 			tx.Lock()
 			defer tx.Unlock()
 
 			UnsafeCreateMetaBucket(tx)
 			err := tc.actions.unsafeExecute(lg, tx)
-			if err != tc.expectError {
+			if !errors.Is(err, tc.expectError) {
 				t.Errorf("Unexpected error or lack thereof, expected: %v, got: %v", tc.expectError, err)
 			}
 			assertBucketState(t, tx, Meta, tc.expectState)

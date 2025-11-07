@@ -17,6 +17,7 @@ package rafthttp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -31,10 +32,8 @@ import (
 	"go.etcd.io/raft/v3"
 )
 
-var (
-	// timeout for reading snapshot response body
-	snapResponseReadTimeout = 5 * time.Second
-)
+// timeout for reading snapshot response body
+var snapResponseReadTimeout = 5 * time.Second
 
 type snapshotSender struct {
 	from, to types.ID
@@ -110,7 +109,7 @@ func (s *snapshotSender) send(merged snap.Message) {
 
 		// errMemberRemoved is a critical error since a removed member should
 		// always be stopped. So we use reportCriticalError to report it to errorc.
-		if err == errMemberRemoved {
+		if errors.Is(err, errMemberRemoved) {
 			reportCriticalError(err, s.errorc)
 		}
 

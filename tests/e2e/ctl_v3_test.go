@@ -15,7 +15,6 @@
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -23,10 +22,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/pkg/v3/expect"
+	"go.etcd.io/etcd/pkg/v3/featuregate"
 	"go.etcd.io/etcd/pkg/v3/flags"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
@@ -59,7 +60,7 @@ func TestClusterVersion(t *testing.T) {
 				e2e.WithRollingStart(tt.rollingStart),
 			)
 
-			epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t, e2e.WithConfig(cfg))
+			epc, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg))
 			if err != nil {
 				t.Fatalf("could not start etcd process cluster (%v)", err)
 			}
@@ -113,9 +114,7 @@ func TestCtlV3DialWithHTTPScheme(t *testing.T) {
 
 func dialWithSchemeTest(cx ctlCtx) {
 	cmdArgs := append(cx.prefixArgs(cx.epc.EndpointsGRPC()), "put", "foo", "bar")
-	if err := e2e.SpawnWithExpectWithEnv(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "OK"}); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, e2e.SpawnWithExpectWithEnv(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "OK"}))
 }
 
 type ctlCtx struct {
@@ -227,13 +226,13 @@ func testCtlWithOffline(t *testing.T, testFunc func(ctlCtx), testOfflineFunc fun
 	}
 	ret.cfg.ServerConfig.StrictReconfigCheck = !ret.disableStrictReconfigCheck
 	if ret.initialCorruptCheck {
-		ret.cfg.ServerConfig.ExperimentalInitialCorruptCheck = ret.initialCorruptCheck
+		ret.cfg.ServerConfig.ServerFeatureGate.(featuregate.MutableFeatureGate).Set(fmt.Sprintf("InitialCorruptCheck=%t", ret.initialCorruptCheck))
 	}
 	if testOfflineFunc != nil {
 		ret.cfg.KeepDataDir = true
 	}
 
-	epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t, e2e.WithConfig(&ret.cfg))
+	epc, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(&ret.cfg))
 	if err != nil {
 		t.Fatalf("could not start etcd process cluster (%v)", err)
 	}

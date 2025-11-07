@@ -16,13 +16,16 @@ package etcdhttp
 
 import (
 	"encoding/json"
+	errorspkg "errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc/metadata"
 
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api"
@@ -136,14 +139,21 @@ func (h *peerMemberPromoteHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	resp, err := h.server.PromoteMember(r.Context(), id)
+	// reconstruct gRPC metadata from HTTP header (if present) so admin check can pass
+	ctx := r.Context()
+	if tok := r.Header.Get("Authorization"); tok != "" {
+		md := metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: tok})
+		ctx = metadata.NewIncomingContext(ctx, md)
+	}
+
+	resp, err := h.server.PromoteMember(ctx, id)
 	if err != nil {
-		switch err {
-		case membership.ErrIDNotFound:
+		switch {
+		case errorspkg.Is(err, membership.ErrIDNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
-		case membership.ErrMemberNotLearner:
+		case errorspkg.Is(err, membership.ErrMemberNotLearner):
 			http.Error(w, err.Error(), http.StatusPreconditionFailed)
-		case errors.ErrLearnerNotReady:
+		case errorspkg.Is(err, errors.ErrLearnerNotReady):
 			http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		default:
 			writeError(h.lg, w, r, err)

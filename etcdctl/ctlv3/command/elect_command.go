@@ -28,16 +28,15 @@ import (
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
-var (
-	electListen bool
-)
+var electListen bool
 
 // NewElectCommand returns the cobra command for "elect".
 func NewElectCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "elect <election-name> [proposal]",
-		Short: "Observes and participates in leader election",
-		Run:   electCommandFunc,
+		Use:     "elect <election-name> [proposal]",
+		Short:   "Observes and participates in leader election",
+		Run:     electCommandFunc,
+		GroupID: groupConcurrencyID,
 	}
 	cmd.Flags().BoolVarP(&electListen, "listen", "l", false, "observation mode")
 	return cmd

@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -38,7 +39,7 @@ func testMoveLeader(t *testing.T, auto bool) {
 	defer clus.Terminate(t)
 
 	oldLeadIdx := clus.WaitLeader(t)
-	oldLeadID := uint64(clus.Members[oldLeadIdx].Server.MemberId())
+	oldLeadID := uint64(clus.Members[oldLeadIdx].Server.MemberID())
 
 	// ensure followers go through leader transition while leadership transfer
 	idc := make(chan uint64)
@@ -56,18 +57,14 @@ func testMoveLeader(t *testing.T, auto bool) {
 		}
 	}
 
-	target := uint64(clus.Members[(oldLeadIdx+1)%3].Server.MemberId())
+	target := uint64(clus.Members[(oldLeadIdx+1)%3].Server.MemberID())
 	if auto {
 		err := clus.Members[oldLeadIdx].Server.TryTransferLeadershipOnShutdown()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 	} else {
 		mvc := integration.ToGRPC(clus.Client(oldLeadIdx)).Maintenance
-		_, err := mvc.MoveLeader(context.TODO(), &pb.MoveLeaderRequest{TargetID: target})
-		if err != nil {
-			t.Fatal(err)
-		}
+		_, err := mvc.MoveLeader(t.Context(), &pb.MoveLeaderRequest{TargetID: target})
+		require.NoError(t, err)
 	}
 
 	// wait until leader transitions have happened
@@ -108,10 +105,10 @@ func TestMoveLeaderError(t *testing.T) {
 	oldLeadIdx := clus.WaitLeader(t)
 	followerIdx := (oldLeadIdx + 1) % 3
 
-	target := uint64(clus.Members[(oldLeadIdx+2)%3].Server.MemberId())
+	target := uint64(clus.Members[(oldLeadIdx+2)%3].Server.MemberID())
 
 	mvc := integration.ToGRPC(clus.Client(followerIdx)).Maintenance
-	_, err := mvc.MoveLeader(context.TODO(), &pb.MoveLeaderRequest{TargetID: target})
+	_, err := mvc.MoveLeader(t.Context(), &pb.MoveLeaderRequest{TargetID: target})
 	if !eqErrGRPC(err, rpctypes.ErrGRPCNotLeader) {
 		t.Errorf("err = %v, want %v", err, rpctypes.ErrGRPCNotLeader)
 	}
@@ -139,7 +136,7 @@ func TestMoveLeaderToLearnerError(t *testing.T) {
 	learnerID := learners[0].ID
 	leaderIdx := clus.WaitLeader(t)
 	cli := clus.Client(leaderIdx)
-	_, err = cli.MoveLeader(context.Background(), learnerID)
+	_, err = cli.MoveLeader(t.Context(), learnerID)
 	if err == nil {
 		t.Fatalf("expecting leader transfer to learner to fail, got no error")
 	}
@@ -186,7 +183,7 @@ func TestTransferLeadershipWithLearner(t *testing.T) {
 
 func TestFirstCommitNotification(t *testing.T) {
 	integration.BeforeTest(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	clusterSize := 3
 	cluster := integration.NewCluster(t, &integration.ClusterConfig{Size: clusterSize})
 	defer cluster.Terminate(t)
@@ -195,15 +192,14 @@ func TestFirstCommitNotification(t *testing.T) {
 	oldLeaderClient := cluster.Client(oldLeaderIdx)
 
 	newLeaderIdx := (oldLeaderIdx + 1) % clusterSize
-	newLeaderId := uint64(cluster.Members[newLeaderIdx].ID())
+	newLeaderID := uint64(cluster.Members[newLeaderIdx].ID())
 
 	notifiers := make(map[int]<-chan struct{}, clusterSize)
 	for i, clusterMember := range cluster.Members {
 		notifiers[i] = clusterMember.Server.FirstCommitInTermNotify()
 	}
 
-	_, err := oldLeaderClient.MoveLeader(context.Background(), newLeaderId)
-
+	_, err := oldLeaderClient.MoveLeader(t.Context(), newLeaderID)
 	if err != nil {
 		t.Errorf("got error during leadership transfer: %v", err)
 	}
@@ -240,14 +236,14 @@ func TestFirstCommitNotification(t *testing.T) {
 
 func checkFirstCommitNotification(
 	ctx context.Context,
-	t testing.TB,
+	tb testing.TB,
 	member *integration.Member,
 	leaderAppliedIndex uint64,
 	notifier <-chan struct{},
 ) error {
 	// wait until server applies all the changes of leader
 	for member.Server.AppliedIndex() < leaderAppliedIndex {
-		t.Logf("member.Server.AppliedIndex():%v <= leaderAppliedIndex:%v", member.Server.AppliedIndex(), leaderAppliedIndex)
+		tb.Logf("member.Server.AppliedIndex():%v <= leaderAppliedIndex:%v", member.Server.AppliedIndex(), leaderAppliedIndex)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -265,7 +261,7 @@ func checkFirstCommitNotification(
 			)
 		}
 	default:
-		t.Logf("member.Server.AppliedIndex():%v >= leaderAppliedIndex:%v", member.Server.AppliedIndex(), leaderAppliedIndex)
+		tb.Logf("member.Server.AppliedIndex():%v >= leaderAppliedIndex:%v", member.Server.AppliedIndex(), leaderAppliedIndex)
 		return fmt.Errorf(
 			"notification was not triggered, member ID: %d",
 			member.ID(),

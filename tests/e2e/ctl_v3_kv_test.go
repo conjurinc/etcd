@@ -37,10 +37,11 @@ func TestCtlV3PutIgnoreLease(t *testing.T) { testCtl(t, putTestIgnoreLease) }
 
 func TestCtlV3GetTimeout(t *testing.T) { testCtl(t, getTest, withDefaultDialTimeout()) }
 
-func TestCtlV3GetFormat(t *testing.T)    { testCtl(t, getFormatTest) }
-func TestCtlV3GetRev(t *testing.T)       { testCtl(t, getRevTest) }
-func TestCtlV3GetKeysOnly(t *testing.T)  { testCtl(t, getKeysOnlyTest) }
-func TestCtlV3GetCountOnly(t *testing.T) { testCtl(t, getCountOnlyTest) }
+func TestCtlV3GetFormat(t *testing.T)             { testCtl(t, getFormatTest) }
+func TestCtlV3GetRev(t *testing.T)                { testCtl(t, getRevTest) }
+func TestCtlV3GetMinMaxCreateModRev(t *testing.T) { testCtl(t, getMinMaxCreateModRevTest) }
+func TestCtlV3GetKeysOnly(t *testing.T)           { testCtl(t, getKeysOnlyTest) }
+func TestCtlV3GetCountOnly(t *testing.T)          { testCtl(t, getCountOnlyTest) }
 
 func TestCtlV3DelTimeout(t *testing.T) { testCtl(t, delTest, withDefaultDialTimeout()) }
 
@@ -56,14 +57,11 @@ func TestCtlV3GetRevokedCRL(t *testing.T) {
 
 func testGetRevokedCRL(cx ctlCtx) {
 	// test reject
-	err := ctlV3Put(cx, "k", "v", "")
-	require.ErrorContains(cx.t, err, "context deadline exceeded")
+	require.ErrorContains(cx.t, ctlV3Put(cx, "k", "v", ""), "context deadline exceeded")
 
 	// test accept
 	cx.epc.Cfg.Client.RevokeCerts = false
-	if err := ctlV3Put(cx, "k", "v", ""); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, ctlV3Put(cx, "k", "v", ""))
 }
 
 func putTest(cx ctlCtx) {
@@ -82,18 +80,10 @@ func putTest(cx ctlCtx) {
 }
 
 func putTestIgnoreValue(cx ctlCtx) {
-	if err := ctlV3Put(cx, "foo", "bar", ""); err != nil {
-		cx.t.Fatal(err)
-	}
-	if err := ctlV3Get(cx, []string{"foo"}, kv{"foo", "bar"}); err != nil {
-		cx.t.Fatal(err)
-	}
-	if err := ctlV3Put(cx, "foo", "", "", "--ignore-value"); err != nil {
-		cx.t.Fatal(err)
-	}
-	if err := ctlV3Get(cx, []string{"foo"}, kv{"foo", "bar"}); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, ctlV3Put(cx, "foo", "bar", ""))
+	require.NoError(cx.t, ctlV3Get(cx, []string{"foo"}, kv{"foo", "bar"}))
+	require.NoError(cx.t, ctlV3Put(cx, "foo", "", "", "--ignore-value"))
+	require.NoError(cx.t, ctlV3Get(cx, []string{"foo"}, kv{"foo", "bar"}))
 }
 
 func putTestIgnoreLease(cx ctlCtx) {
@@ -158,9 +148,7 @@ func getTest(cx ctlCtx) {
 }
 
 func getFormatTest(cx ctlCtx) {
-	if err := ctlV3Put(cx, "abc", "123", ""); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, ctlV3Put(cx, "abc", "123", ""))
 
 	tests := []struct {
 		format    string
@@ -190,9 +178,7 @@ func getFormatTest(cx ctlCtx) {
 }
 
 func getRevTest(cx ctlCtx) {
-	var (
-		kvs = []kv{{"key", "val1"}, {"key", "val2"}, {"key", "val3"}}
-	)
+	kvs := []kv{{"key", "val1"}, {"key", "val2"}, {"key", "val3"}}
 	for i := range kvs {
 		if err := ctlV3Put(cx, kvs[i].key, kvs[i].val, ""); err != nil {
 			cx.t.Fatalf("getRevTest #%d: ctlV3Put error (%v)", i, err)
@@ -216,52 +202,63 @@ func getRevTest(cx ctlCtx) {
 	}
 }
 
+func getMinMaxCreateModRevTest(cx ctlCtx) {
+	kvs := []kv{ //     revision:   store | key create | key modify
+		{"key1", "val1"}, //     2         2           2
+		{"key2", "val2"}, //     3         3           3
+		{"key1", "val3"}, //     4         2           4
+		{"key4", "val4"}, //     5         5           5
+	}
+	for i := range kvs {
+		if err := ctlV3Put(cx, kvs[i].key, kvs[i].val, ""); err != nil {
+			cx.t.Fatalf("getRevTest #%d: ctlV3Put error (%v)", i, err)
+		}
+	}
+
+	tests := []struct {
+		args []string
+
+		wkv []kv
+	}{
+		{[]string{"key", "--prefix", "--max-create-rev", "3"}, []kv{kvs[1], kvs[2]}},
+		{[]string{"key", "--prefix", "--min-create-rev", "3"}, []kv{kvs[1], kvs[3]}},
+		{[]string{"key", "--prefix", "--max-mod-rev", "3"}, []kv{kvs[1]}},
+		{[]string{"key", "--prefix", "--min-mod-rev", "4"}, kvs[2:]},
+	}
+
+	for i, tt := range tests {
+		if err := ctlV3Get(cx, tt.args, tt.wkv...); err != nil {
+			cx.t.Errorf("getMinModRevTest #%d: ctlV3Get error (%v)", i, err)
+		}
+	}
+}
+
 func getKeysOnlyTest(cx ctlCtx) {
-	if err := ctlV3Put(cx, "key", "val", ""); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, ctlV3Put(cx, "key", "val", ""))
 	cmdArgs := append(cx.PrefixArgs(), []string{"get", "--keys-only", "key"}...)
-	if err := e2e.SpawnWithExpectWithEnv(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "key"}); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, e2e.SpawnWithExpectWithEnv(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "key"}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	lines, err := e2e.SpawnWithExpectLines(ctx, cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "key"})
 	require.NoError(cx.t, err)
-	require.NotContains(cx.t, lines, "val", "got value but passed --keys-only")
+	require.NotContainsf(cx.t, lines, "val", "got value but passed --keys-only")
 }
 
 func getCountOnlyTest(cx ctlCtx) {
 	cmdArgs := append(cx.PrefixArgs(), []string{"get", "--count-only", "key", "--prefix", "--write-out=fields"}...)
-	if err := e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 0"}); err != nil {
-		cx.t.Fatal(err)
-	}
-	if err := ctlV3Put(cx, "key", "val", ""); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 0"}))
+	require.NoError(cx.t, ctlV3Put(cx, "key", "val", ""))
 	cmdArgs = append(cx.PrefixArgs(), []string{"get", "--count-only", "key", "--prefix", "--write-out=fields"}...)
-	if err := e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 1"}); err != nil {
-		cx.t.Fatal(err)
-	}
-	if err := ctlV3Put(cx, "key1", "val", ""); err != nil {
-		cx.t.Fatal(err)
-	}
-	if err := ctlV3Put(cx, "key1", "val", ""); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 1"}))
+	require.NoError(cx.t, ctlV3Put(cx, "key1", "val", ""))
+	require.NoError(cx.t, ctlV3Put(cx, "key1", "val", ""))
 	cmdArgs = append(cx.PrefixArgs(), []string{"get", "--count-only", "key", "--prefix", "--write-out=fields"}...)
-	if err := e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 2"}); err != nil {
-		cx.t.Fatal(err)
-	}
-	if err := ctlV3Put(cx, "key2", "val", ""); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 2"}))
+	require.NoError(cx.t, ctlV3Put(cx, "key2", "val", ""))
 	cmdArgs = append(cx.PrefixArgs(), []string{"get", "--count-only", "key", "--prefix", "--write-out=fields"}...)
-	if err := e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 3"}); err != nil {
-		cx.t.Fatal(err)
-	}
+	require.NoError(cx.t, e2e.SpawnWithExpects(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: "\"Count\" : 3"}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

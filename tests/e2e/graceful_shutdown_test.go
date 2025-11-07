@@ -47,7 +47,7 @@ func TestGracefulShutdown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			testRunner := e2e.NewE2eRunner()
 			testRunner.BeforeTest(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterSize(tc.clusterSize))
 			// clean up orphaned resources like closing member client.
@@ -83,7 +83,7 @@ func tryShutdownLeader(ctx context.Context, t *testing.T, members []interfaces.M
 		time.Sleep(500 * time.Millisecond)
 		resps, err := followers[0].Client().Status(ctx)
 		require.NoError(t, err)
-		require.NotEqual(t, leaderID, raft.None)
+		require.NotEqual(t, raft.None, leaderID)
 		require.Equal(t, resps[0].RaftTerm, term+1)
 		require.NotEqualf(t, resps[0].Leader, leaderID, "expect old leaderID %x changed to new leader ID %x", leaderID, resps[0].Leader)
 

@@ -16,11 +16,14 @@ package v3rpc
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math/rand"
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -28,6 +31,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/verify"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/traceutil"
 	"go.etcd.io/etcd/server/v3/auth"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/apply"
@@ -42,7 +46,7 @@ type watchServer struct {
 	clusterID int64
 	memberID  int64
 
-	maxRequestBytes int
+	maxRequestBytes uint
 
 	sg        apply.RaftStatusGetter
 	watchable mvcc.WatchableKV
@@ -55,9 +59,9 @@ func NewWatchServer(s *etcdserver.EtcdServer) pb.WatchServer {
 		lg: s.Cfg.Logger,
 
 		clusterID: int64(s.Cluster().ID()),
-		memberID:  int64(s.MemberId()),
+		memberID:  int64(s.MemberID()),
 
-		maxRequestBytes: int(s.Cfg.MaxRequestBytes + grpcOverheadBytes),
+		maxRequestBytes: s.Cfg.MaxRequestBytesWithOverhead(),
 
 		sg:        s,
 		watchable: s.Watchable(),
@@ -125,7 +129,7 @@ type serverWatchStream struct {
 	clusterID int64
 	memberID  int64
 
-	maxRequestBytes int
+	maxRequestBytes uint
 
 	sg        apply.RaftStatusGetter
 	watchable mvcc.WatchableKV
@@ -144,10 +148,6 @@ type serverWatchStream struct {
 	prevKV map[mvcc.WatchID]bool
 	// records fragmented watch IDs
 	fragment map[mvcc.WatchID]bool
-
-	// indicates whether we have an outstanding global progress
-	// notification to send
-	deferredProgress bool
 
 	// closec indicates the stream is closed.
 	closec chan struct{}
@@ -177,8 +177,6 @@ func (ws *watchServer) Watch(stream pb.Watch_WatchServer) (err error) {
 		progress: make(map[mvcc.WatchID]bool),
 		prevKV:   make(map[mvcc.WatchID]bool),
 		fragment: make(map[mvcc.WatchID]bool),
-
-		deferredProgress: false,
 
 		closec: make(chan struct{}),
 	}
@@ -217,13 +215,13 @@ func (ws *watchServer) Watch(stream pb.Watch_WatchServer) (err error) {
 	// revisited.
 	select {
 	case err = <-errc:
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			err = rpctypes.ErrGRPCWatchCanceled
 		}
 		close(sws.ctrlStream)
 	case <-stream.Context().Done():
 		err = stream.Context().Err()
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			err = rpctypes.ErrGRPCWatchCanceled
 		}
 	}
@@ -247,7 +245,7 @@ func (sws *serverWatchStream) isWatchPermitted(wcr *pb.WatchCreateRequest) error
 func (sws *serverWatchStream) recvLoop() error {
 	for {
 		req, err := sws.gRPCStream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
@@ -274,19 +272,35 @@ func (sws *serverWatchStream) recvLoop() error {
 				// support  >= key queries
 				creq.RangeEnd = []byte{}
 			}
+			if creq.StartRevision < 0 {
+				wr := &pb.WatchResponse{
+					Header:       sws.newResponseHeader(sws.watchStream.Rev()),
+					WatchId:      clientv3.InvalidWatchID,
+					Canceled:     true,
+					Created:      true,
+					CancelReason: rpctypes.ErrCompacted.Error(),
+				}
+
+				select {
+				case sws.ctrlStream <- wr:
+					continue
+				case <-sws.closec:
+					return nil
+				}
+			}
 
 			err := sws.isWatchPermitted(creq)
 			if err != nil {
 				var cancelReason string
-				switch err {
-				case auth.ErrInvalidAuthToken:
+				switch {
+				case errors.Is(err, auth.ErrInvalidAuthToken):
 					cancelReason = rpctypes.ErrGRPCInvalidAuthToken.Error()
-				case auth.ErrAuthOldRevision:
+				case errors.Is(err, auth.ErrAuthOldRevision):
 					cancelReason = rpctypes.ErrGRPCAuthOldRevision.Error()
-				case auth.ErrUserEmpty:
+				case errors.Is(err, auth.ErrUserEmpty):
 					cancelReason = rpctypes.ErrGRPCUserEmpty.Error()
 				default:
-					if err != auth.ErrPermissionDenied {
+					if !errors.Is(err, auth.ErrPermissionDenied) {
 						sws.lg.Error("unexpected error code", zap.Error(err))
 					}
 					cancelReason = rpctypes.ErrGRPCPermissionDenied.Error()
@@ -309,13 +323,16 @@ func (sws *serverWatchStream) recvLoop() error {
 			}
 
 			filters := FiltersFromRequest(creq)
+			ctx, _ := traceutil.Tracer.Start(sws.gRPCStream.Context(), "watch", trace.WithAttributes(
+				attribute.String("key", string(creq.Key)),
+				attribute.String("range_end", string(creq.RangeEnd)),
+				attribute.Int64("start_rev", creq.StartRevision),
+				attribute.Bool("progress_notify", creq.ProgressNotify),
+				attribute.Bool("prev_kv", creq.PrevKv),
+				attribute.Bool("fragment", creq.Fragment),
+			))
 
-			wsrev := sws.watchStream.Rev()
-			rev := creq.StartRevision
-			if rev == 0 {
-				rev = wsrev + 1
-			}
-			id, err := sws.watchStream.Watch(mvcc.WatchID(creq.WatchId), creq.Key, creq.RangeEnd, rev, filters...)
+			id, err := sws.watchStream.Watch(ctx, mvcc.WatchID(creq.WatchId), creq.Key, creq.RangeEnd, creq.StartRevision, filters...)
 			if err == nil {
 				sws.mu.Lock()
 				if creq.ProgressNotify {
@@ -333,7 +350,7 @@ func (sws *serverWatchStream) recvLoop() error {
 			}
 
 			wr := &pb.WatchResponse{
-				Header:   sws.newResponseHeader(wsrev),
+				Header:   sws.newResponseHeader(sws.watchStream.Rev()),
 				WatchId:  int64(id),
 				Created:  true,
 				Canceled: err != nil,
@@ -352,11 +369,17 @@ func (sws *serverWatchStream) recvLoop() error {
 				id := uv.CancelRequest.WatchId
 				err := sws.watchStream.Cancel(mvcc.WatchID(id))
 				if err == nil {
-					sws.ctrlStream <- &pb.WatchResponse{
+					wr := &pb.WatchResponse{
 						Header:   sws.newResponseHeader(sws.watchStream.Rev()),
 						WatchId:  id,
 						Canceled: true,
 					}
+					select {
+					case sws.ctrlStream <- wr:
+					case <-sws.closec:
+						return nil
+					}
+
 					sws.mu.Lock()
 					delete(sws.progress, mvcc.WatchID(id))
 					delete(sws.prevKV, mvcc.WatchID(id))
@@ -367,14 +390,7 @@ func (sws *serverWatchStream) recvLoop() error {
 		case *pb.WatchRequest_ProgressRequest:
 			if uv.ProgressRequest != nil {
 				sws.mu.Lock()
-				// Ignore if deferred progress notification is already in progress
-				if !sws.deferredProgress {
-					// Request progress for all watchers,
-					// force generation of a response
-					if !sws.watchStream.RequestProgressAll() {
-						sws.deferredProgress = true
-					}
-				}
+				sws.watchStream.RequestProgressAll()
 				sws.mu.Unlock()
 			}
 		default:
@@ -462,6 +478,7 @@ func (sws *serverWatchStream) sendLoop() {
 			sws.mu.RUnlock()
 
 			var serr error
+			// gofail: var beforeSendWatchResponse struct{}
 			if !fragmented && !ok {
 				serr = sws.gRPCStream.Send(wr)
 			} else {
@@ -482,11 +499,6 @@ func (sws *serverWatchStream) sendLoop() {
 			if len(evs) > 0 && sws.progress[wresp.WatchID] {
 				// elide next progress update if sent a key update
 				sws.progress[wresp.WatchID] = false
-			}
-			if sws.deferredProgress {
-				if sws.watchStream.RequestProgressAll() {
-					sws.deferredProgress = false
-				}
 			}
 			sws.mu.Unlock()
 
@@ -554,11 +566,12 @@ func IsCreateEvent(e mvccpb.Event) bool {
 
 func sendFragments(
 	wr *pb.WatchResponse,
-	maxRequestBytes int,
-	sendFunc func(*pb.WatchResponse) error) error {
+	maxRequestBytes uint,
+	sendFunc func(*pb.WatchResponse) error,
+) error {
 	// no need to fragment if total request size is smaller
 	// than max request limit or response contains only one event
-	if wr.Size() < maxRequestBytes || len(wr.Events) < 2 {
+	if uint(wr.Size()) < maxRequestBytes || len(wr.Events) < 2 {
 		return sendFunc(wr)
 	}
 
@@ -571,7 +584,7 @@ func sendFragments(
 		cur := ow
 		for _, ev := range wr.Events[idx:] {
 			cur.Events = append(cur.Events, ev)
-			if len(cur.Events) > 1 && cur.Size() >= maxRequestBytes {
+			if len(cur.Events) > 1 && uint(cur.Size()) >= maxRequestBytes {
 				cur.Events = cur.Events[:len(cur.Events)-1]
 				break
 			}

@@ -20,7 +20,6 @@
 package embed_test
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -30,23 +29,22 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
-var (
-	testTLSInfo = transport.TLSInfo{
-		KeyFile:        testutils.MustAbsPath("../../fixtures/server.key.insecure"),
-		CertFile:       testutils.MustAbsPath("../../fixtures/server.crt"),
-		TrustedCAFile:  testutils.MustAbsPath("../../fixtures/ca.crt"),
-		ClientCertAuth: true,
-	}
-)
+var testTLSInfo = transport.TLSInfo{
+	KeyFile:        testutils.MustAbsPath("../../fixtures/server.key.insecure"),
+	CertFile:       testutils.MustAbsPath("../../fixtures/server.crt"),
+	TrustedCAFile:  testutils.MustAbsPath("../../fixtures/ca.crt"),
+	ClientCertAuth: true,
+}
 
 func TestEmbedEtcd(t *testing.T) {
 	testutil.SkipTestIfShortMode(t, "Cannot start embedded cluster in --short tests")
@@ -58,7 +56,6 @@ func TestEmbedEtcd(t *testing.T) {
 		wpeers   int
 		wclients int
 	}{
-		{werr: "multiple discovery"},
 		{werr: "advertise-client-urls is required"},
 		{werr: "should be at least"},
 		{werr: "is too long"},
@@ -78,18 +75,17 @@ func TestEmbedEtcd(t *testing.T) {
 		tests[i].cfg.LogOutputs = []string{"/dev/null"}
 	}
 
-	tests[0].cfg.Durl = "abc"
-	setupEmbedCfg(&tests[1].cfg, []url.URL{urls[0]}, []url.URL{urls[1]})
-	tests[1].cfg.AdvertiseClientUrls = nil
-	tests[2].cfg.TickMs = tests[2].cfg.ElectionMs - 1
-	tests[3].cfg.ElectionMs = 999999
-	setupEmbedCfg(&tests[4].cfg, []url.URL{urls[2]}, []url.URL{urls[3]})
-	setupEmbedCfg(&tests[5].cfg, []url.URL{urls[4]}, []url.URL{urls[5], urls[6]})
-	setupEmbedCfg(&tests[6].cfg, []url.URL{urls[7], urls[8]}, []url.URL{urls[9]})
+	setupEmbedCfg(&tests[0].cfg, []url.URL{urls[0]}, []url.URL{urls[1]})
+	tests[0].cfg.AdvertiseClientUrls = nil
+	tests[1].cfg.TickMs = tests[2].cfg.ElectionMs - 1
+	tests[2].cfg.ElectionMs = 999999
+	setupEmbedCfg(&tests[3].cfg, []url.URL{urls[2]}, []url.URL{urls[3]})
+	setupEmbedCfg(&tests[4].cfg, []url.URL{urls[4]}, []url.URL{urls[5], urls[6]})
+	setupEmbedCfg(&tests[5].cfg, []url.URL{urls[7], urls[8]}, []url.URL{urls[9]})
 
 	dnsURL, _ := url.Parse("http://whatever.test:12345")
-	tests[7].cfg.ListenClientUrls = []url.URL{*dnsURL}
-	tests[8].cfg.ListenPeerUrls = []url.URL{*dnsURL}
+	tests[6].cfg.ListenClientUrls = []url.URL{*dnsURL}
+	tests[7].cfg.ListenPeerUrls = []url.URL{*dnsURL}
 
 	dir := filepath.Join(t.TempDir(), "embed-etcd")
 
@@ -148,9 +144,7 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 	cfg.Dir = filepath.Join(t.TempDir(), "embed-etcd")
 
 	e, err := embed.StartEtcd(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	<-e.Server.ReadyNotify() // wait for e.Server to join the cluster
 
 	clientCfg := clientv3.Config{
@@ -158,18 +152,14 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 	}
 	if secure {
 		clientCfg.TLS, err = testTLSInfo.ClientConfig()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 	}
-	cli, err := integration2.NewClient(t, clientCfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli, err := integration.NewClient(t, clientCfg)
+	require.NoError(t, err)
 	defer cli.Close()
 
 	// open watch connection
-	cli.Watch(context.Background(), "foo")
+	cli.Watch(t.Context(), "foo")
 
 	donec := make(chan struct{})
 	go func() {
@@ -182,9 +172,7 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 		t.Fatalf("took too long to close server")
 	}
 	err = <-e.Err()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 }
 
 func newEmbedURLs(secure bool, n int) (urls []url.URL) {
@@ -222,9 +210,51 @@ func TestEmbedEtcdAutoCompactionRetentionRetained(t *testing.T) {
 	cfg.AutoCompactionRetention = "2"
 
 	e, err := embed.StartEtcd(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	autoCompactionRetention := e.Server.Cfg.AutoCompactionRetention
-	duration_to_compare, _ := time.ParseDuration("2h0m0s")
-	assert.Equal(t, duration_to_compare, autoCompactionRetention)
+	durationToCompare, _ := time.ParseDuration("2h0m0s")
+	assert.Equal(t, durationToCompare, autoCompactionRetention)
 	e.Close()
+}
+
+func TestEmbedEtcdStopDuringBootstrapping(t *testing.T) {
+	integration.BeforeTest(t, integration.WithFailpoint("beforePublishing", `sleep("2s")`))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		cfg := embed.NewConfig()
+		urls := newEmbedURLs(false, 2)
+		setupEmbedCfg(cfg, []url.URL{urls[0]}, []url.URL{urls[1]})
+		cfg.Dir = filepath.Join(t.TempDir(), "embed-etcd")
+
+		e, err := embed.StartEtcd(cfg)
+		if err != nil {
+			t.Errorf("Failed to start etcd, got error %v", err)
+		}
+		defer e.Close()
+
+		go func() {
+			time.Sleep(time.Second)
+			e.Server.Stop()
+			t.Log("Stopped server during bootstrapping")
+		}()
+
+		select {
+		case <-e.Server.ReadyNotify():
+			t.Log("Server is ready!")
+		case <-e.Server.StopNotify():
+			t.Log("Server is stopped")
+		case <-time.After(20 * time.Second):
+			e.Server.Stop() // trigger a shutdown
+			t.Error("Server took too long to start!")
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("timeout in bootstrapping etcd")
+	}
 }

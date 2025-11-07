@@ -15,10 +15,11 @@
 package mvcc
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
-	"github.com/google/btree"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -46,7 +47,7 @@ func TestIndexGet(t *testing.T) {
 	}
 	for i, tt := range tests {
 		rev, created, ver, err := ti.Get([]byte("foo"), tt.rev)
-		if err != tt.werr {
+		if !errors.Is(err, tt.werr) {
 			t.Errorf("#%d: err = %v, want %v", i, err, tt.werr)
 		}
 		if rev != tt.wrev {
@@ -63,7 +64,7 @@ func TestIndexGet(t *testing.T) {
 
 func TestIndexRange(t *testing.T) {
 	allKeys := [][]byte{[]byte("foo"), []byte("foo1"), []byte("foo2")}
-	allRevs := []Revision{Revision{Main: 1}, Revision{Main: 2}, Revision{Main: 3}}
+	allRevs := []Revision{{Main: 1}, {Main: 2}, {Main: 3}}
 
 	ti := newTreeIndex(zaptest.NewLogger(t))
 	for i := range allKeys {
@@ -130,18 +131,18 @@ func TestIndexTombstone(t *testing.T) {
 	}
 
 	_, _, _, err = ti.Get([]byte("foo"), 2)
-	if err != ErrRevisionNotFound {
+	if !errors.Is(err, ErrRevisionNotFound) {
 		t.Errorf("get error = %v, want ErrRevisionNotFound", err)
 	}
 	err = ti.Tombstone([]byte("foo"), Revision{Main: 3})
-	if err != ErrRevisionNotFound {
+	if !errors.Is(err, ErrRevisionNotFound) {
 		t.Errorf("tombstone error = %v, want %v", err, ErrRevisionNotFound)
 	}
 }
 
 func TestIndexRevision(t *testing.T) {
 	allKeys := [][]byte{[]byte("foo"), []byte("foo1"), []byte("foo2"), []byte("foo2"), []byte("foo1"), []byte("foo")}
-	allRevs := []Revision{Revision{Main: 1}, Revision{Main: 2}, Revision{Main: 3}, Revision{Main: 4}, Revision{Main: 5}, Revision{Main: 6}}
+	allRevs := []Revision{{Main: 1}, {Main: 2}, {Main: 3}, {Main: 4}, {Main: 5}, {Main: 6}}
 
 	ti := newTreeIndex(zaptest.NewLogger(t))
 	for i := range allKeys {
@@ -161,23 +162,23 @@ func TestIndexRevision(t *testing.T) {
 		},
 		// single key that found
 		{
-			[]byte("foo"), nil, 6, 0, []Revision{Revision{Main: 6}}, 1,
+			[]byte("foo"), nil, 6, 0, []Revision{{Main: 6}}, 1,
 		},
 		// various range keys, fixed atRev, unlimited
 		{
-			[]byte("foo"), []byte("foo1"), 6, 0, []Revision{Revision{Main: 6}}, 1,
+			[]byte("foo"), []byte("foo1"), 6, 0, []Revision{{Main: 6}}, 1,
 		},
 		{
-			[]byte("foo"), []byte("foo2"), 6, 0, []Revision{Revision{Main: 6}, Revision{Main: 5}}, 2,
+			[]byte("foo"), []byte("foo2"), 6, 0, []Revision{{Main: 6}, {Main: 5}}, 2,
 		},
 		{
-			[]byte("foo"), []byte("fop"), 6, 0, []Revision{Revision{Main: 6}, Revision{Main: 5}, Revision{Main: 4}}, 3,
+			[]byte("foo"), []byte("fop"), 6, 0, []Revision{{Main: 6}, {Main: 5}, {Main: 4}}, 3,
 		},
 		{
-			[]byte("foo1"), []byte("fop"), 6, 0, []Revision{Revision{Main: 5}, Revision{Main: 4}}, 2,
+			[]byte("foo1"), []byte("fop"), 6, 0, []Revision{{Main: 5}, {Main: 4}}, 2,
 		},
 		{
-			[]byte("foo2"), []byte("fop"), 6, 0, []Revision{Revision{Main: 4}}, 1,
+			[]byte("foo2"), []byte("fop"), 6, 0, []Revision{{Main: 4}}, 1,
 		},
 		{
 			[]byte("foo3"), []byte("fop"), 6, 0, nil, 0,
@@ -187,38 +188,38 @@ func TestIndexRevision(t *testing.T) {
 			[]byte("foo1"), []byte("fop"), 1, 0, nil, 0,
 		},
 		{
-			[]byte("foo1"), []byte("fop"), 2, 0, []Revision{Revision{Main: 2}}, 1,
+			[]byte("foo1"), []byte("fop"), 2, 0, []Revision{{Main: 2}}, 1,
 		},
 		{
-			[]byte("foo1"), []byte("fop"), 3, 0, []Revision{Revision{Main: 2}, Revision{Main: 3}}, 2,
+			[]byte("foo1"), []byte("fop"), 3, 0, []Revision{{Main: 2}, {Main: 3}}, 2,
 		},
 		{
-			[]byte("foo1"), []byte("fop"), 4, 0, []Revision{Revision{Main: 2}, Revision{Main: 4}}, 2,
+			[]byte("foo1"), []byte("fop"), 4, 0, []Revision{{Main: 2}, {Main: 4}}, 2,
 		},
 		{
-			[]byte("foo1"), []byte("fop"), 5, 0, []Revision{Revision{Main: 5}, Revision{Main: 4}}, 2,
+			[]byte("foo1"), []byte("fop"), 5, 0, []Revision{{Main: 5}, {Main: 4}}, 2,
 		},
 		{
-			[]byte("foo1"), []byte("fop"), 6, 0, []Revision{Revision{Main: 5}, Revision{Main: 4}}, 2,
+			[]byte("foo1"), []byte("fop"), 6, 0, []Revision{{Main: 5}, {Main: 4}}, 2,
 		},
 		// fixed range keys, fixed atRev, various limit
 		{
-			[]byte("foo"), []byte("fop"), 6, 1, []Revision{Revision{Main: 6}}, 3,
+			[]byte("foo"), []byte("fop"), 6, 1, []Revision{{Main: 6}}, 3,
 		},
 		{
-			[]byte("foo"), []byte("fop"), 6, 2, []Revision{Revision{Main: 6}, Revision{Main: 5}}, 3,
+			[]byte("foo"), []byte("fop"), 6, 2, []Revision{{Main: 6}, {Main: 5}}, 3,
 		},
 		{
-			[]byte("foo"), []byte("fop"), 6, 3, []Revision{Revision{Main: 6}, Revision{Main: 5}, Revision{Main: 4}}, 3,
+			[]byte("foo"), []byte("fop"), 6, 3, []Revision{{Main: 6}, {Main: 5}, {Main: 4}}, 3,
 		},
 		{
-			[]byte("foo"), []byte("fop"), 3, 1, []Revision{Revision{Main: 1}}, 3,
+			[]byte("foo"), []byte("fop"), 3, 1, []Revision{{Main: 1}}, 3,
 		},
 		{
-			[]byte("foo"), []byte("fop"), 3, 2, []Revision{Revision{Main: 1}, Revision{Main: 2}}, 3,
+			[]byte("foo"), []byte("fop"), 3, 2, []Revision{{Main: 1}, {Main: 2}}, 3,
 		},
 		{
-			[]byte("foo"), []byte("fop"), 3, 3, []Revision{Revision{Main: 1}, Revision{Main: 2}, Revision{Main: 3}}, 3,
+			[]byte("foo"), []byte("fop"), 3, 3, []Revision{{Main: 1}, {Main: 2}, {Main: 3}}, 3,
 		},
 	}
 	for i, tt := range tests {
@@ -235,101 +236,445 @@ func TestIndexRevision(t *testing.T) {
 
 func TestIndexCompactAndKeep(t *testing.T) {
 	maxRev := int64(20)
-	tests := []struct {
-		key     []byte
-		remove  bool
-		rev     Revision
-		created Revision
-		ver     int64
-	}{
-		{[]byte("foo"), false, Revision{Main: 1}, Revision{Main: 1}, 1},
-		{[]byte("foo1"), false, Revision{Main: 2}, Revision{Main: 2}, 1},
-		{[]byte("foo2"), false, Revision{Main: 3}, Revision{Main: 3}, 1},
-		{[]byte("foo2"), false, Revision{Main: 4}, Revision{Main: 3}, 2},
-		{[]byte("foo"), false, Revision{Main: 5}, Revision{Main: 1}, 2},
-		{[]byte("foo1"), false, Revision{Main: 6}, Revision{Main: 2}, 2},
-		{[]byte("foo1"), true, Revision{Main: 7}, Revision{}, 0},
-		{[]byte("foo2"), true, Revision{Main: 8}, Revision{}, 0},
-		{[]byte("foo"), true, Revision{Main: 9}, Revision{}, 0},
-		{[]byte("foo"), false, Revision{Main: 10}, Revision{Main: 10}, 1},
-		{[]byte("foo1"), false, Revision{Main: 10, Sub: 1}, Revision{Main: 10, Sub: 1}, 1},
+
+	// key: "foo"
+	// modified: 10
+	// generations:
+	//	{{10, 0}}
+	//	{{1, 0}, {5, 0}, {9, 0}(t)}
+	//
+	// key: "foo1"
+	// modified: 10, 1
+	// generations:
+	//	{{10, 1}}
+	//	{{2, 0}, {6, 0}, {7, 0}(t)}
+	//
+	// key: "foo2"
+	// modified: 8
+	// generations:
+	//	{empty}
+	//	{{3, 0}, {4, 0}, {8, 0}(t)}
+	//
+	buildTreeIndex := func() index {
+		ti := newTreeIndex(zaptest.NewLogger(t))
+
+		ti.Put([]byte("foo"), Revision{Main: 1})
+		ti.Put([]byte("foo1"), Revision{Main: 2})
+		ti.Put([]byte("foo2"), Revision{Main: 3})
+		ti.Put([]byte("foo2"), Revision{Main: 4})
+		ti.Put([]byte("foo"), Revision{Main: 5})
+		ti.Put([]byte("foo1"), Revision{Main: 6})
+		require.NoError(t, ti.Tombstone([]byte("foo1"), Revision{Main: 7}))
+		require.NoError(t, ti.Tombstone([]byte("foo2"), Revision{Main: 8}))
+		require.NoError(t, ti.Tombstone([]byte("foo"), Revision{Main: 9}))
+		ti.Put([]byte("foo"), Revision{Main: 10})
+		ti.Put([]byte("foo1"), Revision{Main: 10, Sub: 1})
+		return ti
 	}
 
-	// Continuous Compact and Keep
-	ti := newTreeIndex(zaptest.NewLogger(t))
-	for _, tt := range tests {
-		if tt.remove {
-			ti.Tombstone(tt.key, tt.rev)
-		} else {
-			ti.Put(tt.key, tt.rev)
-		}
+	afterCompacts := []struct {
+		atRev      int
+		keyIndexes []keyIndex
+		keep       map[Revision]struct{}
+		compacted  map[Revision]struct{}
+	}{
+		{
+			atRev: 1,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 1}, {Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 2}, revs: []Revision{{Main: 2}, {Main: 6}, {Main: 7}}},
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 3}, {Main: 4}, {Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 1}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 1}: {},
+			},
+		},
+		{
+			atRev: 2,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 1}, {Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 2}, revs: []Revision{{Main: 2}, {Main: 6}, {Main: 7}}},
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 3}, {Main: 4}, {Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 1}: {},
+				{Main: 2}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 1}: {},
+				{Main: 2}: {},
+			},
+		},
+		{
+			atRev: 3,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 1}, {Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 2}, revs: []Revision{{Main: 2}, {Main: 6}, {Main: 7}}},
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 3}, {Main: 4}, {Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 1}: {},
+				{Main: 2}: {},
+				{Main: 3}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 1}: {},
+				{Main: 2}: {},
+				{Main: 3}: {},
+			},
+		},
+		{
+			atRev: 4,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 1}, {Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 2}, revs: []Revision{{Main: 2}, {Main: 6}, {Main: 7}}},
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 4}, {Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 1}: {},
+				{Main: 2}: {},
+				{Main: 4}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 1}: {},
+				{Main: 2}: {},
+				{Main: 4}: {},
+			},
+		},
+		{
+			atRev: 5,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 2}, revs: []Revision{{Main: 2}, {Main: 6}, {Main: 7}}},
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 4}, {Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 2}: {},
+				{Main: 4}: {},
+				{Main: 5}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 2}: {},
+				{Main: 4}: {},
+				{Main: 5}: {},
+			},
+		},
+		{
+			atRev: 6,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 2}, revs: []Revision{{Main: 6}, {Main: 7}}},
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 4}, {Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 6}: {},
+				{Main: 4}: {},
+				{Main: 5}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 6}: {},
+				{Main: 4}: {},
+				{Main: 5}: {},
+			},
+		},
+		{
+			atRev: 7,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 2}, revs: []Revision{{Main: 7}}},
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 4}, {Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 4}: {},
+				{Main: 5}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 7}: {},
+				{Main: 4}: {},
+				{Main: 5}: {},
+			},
+		},
+		{
+			atRev: 8,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 5}, {Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+				{
+					key:      []byte("foo2"),
+					modified: Revision{Main: 8},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 3}, revs: []Revision{{Main: 8}}},
+						{},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 5}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 8}: {},
+				{Main: 5}: {},
+			},
+		},
+		{
+			atRev: 9,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 3, created: Revision{Main: 1}, revs: []Revision{{Main: 9}}},
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{},
+			compacted: map[Revision]struct{}{
+				{Main: 9}: {},
+			},
+		},
+		{
+			atRev: 10,
+			keyIndexes: []keyIndex{
+				{
+					key:      []byte("foo"),
+					modified: Revision{Main: 10},
+					generations: []generation{
+						{ver: 1, created: Revision{Main: 10}, revs: []Revision{{Main: 10}}},
+					},
+				},
+				{
+					key:      []byte("foo1"),
+					modified: Revision{Main: 10, Sub: 1},
+					generations: []generation{
+						{ver: 1, created: Revision{Main: 10, Sub: 1}, revs: []Revision{{Main: 10, Sub: 1}}},
+					},
+				},
+			},
+			keep: map[Revision]struct{}{
+				{Main: 10}:         {},
+				{Main: 10, Sub: 1}: {},
+			},
+			compacted: map[Revision]struct{}{
+				{Main: 10}:         {},
+				{Main: 10, Sub: 1}: {},
+			},
+		},
 	}
+
+	ti := buildTreeIndex()
+	// Continuous Compact and Keep
 	for i := int64(1); i < maxRev; i++ {
+		j := i - 1
+		if i >= int64(len(afterCompacts)) {
+			j = int64(len(afterCompacts)) - 1
+		}
+
 		am := ti.Compact(i)
+		require.Equalf(t, afterCompacts[j].compacted, am, "#%d: compact(%d) != expected", i, i)
+
 		keep := ti.Keep(i)
-		if !(reflect.DeepEqual(am, keep)) {
-			t.Errorf("#%d: compact keep %v != Keep keep %v", i, am, keep)
+		require.Equalf(t, afterCompacts[j].keep, keep, "#%d: keep(%d) != expected", i, i)
+
+		nti := newTreeIndex(zaptest.NewLogger(t)).(*treeIndex)
+		for k := range afterCompacts[j].keyIndexes {
+			ki := afterCompacts[j].keyIndexes[k]
+			nti.tree.ReplaceOrInsert(&ki)
 		}
-		wti := &treeIndex{tree: btree.NewG(32, func(aki *keyIndex, bki *keyIndex) bool {
-			return aki.Less(bki)
-		})}
-		for _, tt := range tests {
-			if _, ok := am[tt.rev]; ok || tt.rev.GreaterThan(Revision{Main: i}) {
-				if tt.remove {
-					wti.Tombstone(tt.key, tt.rev)
-				} else {
-					restore(wti, tt.key, tt.created, tt.rev, tt.ver)
-				}
-			}
-		}
-		if !ti.Equal(wti) {
-			t.Errorf("#%d: not equal ti", i)
-		}
+		require.Truef(t, ti.Equal(nti), "#%d: not equal ti", i)
 	}
 
 	// Once Compact and Keep
 	for i := int64(1); i < maxRev; i++ {
-		ti := newTreeIndex(zaptest.NewLogger(t))
-		for _, tt := range tests {
-			if tt.remove {
-				ti.Tombstone(tt.key, tt.rev)
-			} else {
-				ti.Put(tt.key, tt.rev)
-			}
+		ti := buildTreeIndex()
+
+		j := i - 1
+		if i >= int64(len(afterCompacts)) {
+			j = int64(len(afterCompacts)) - 1
 		}
+
 		am := ti.Compact(i)
+		require.Equalf(t, afterCompacts[j].compacted, am, "#%d: compact(%d) != expected", i, i)
+
 		keep := ti.Keep(i)
-		if !(reflect.DeepEqual(am, keep)) {
-			t.Errorf("#%d: compact keep %v != Keep keep %v", i, am, keep)
-		}
-		wti := &treeIndex{tree: btree.NewG(32, func(aki *keyIndex, bki *keyIndex) bool {
-			return aki.Less(bki)
-		})}
-		for _, tt := range tests {
-			if _, ok := am[tt.rev]; ok || tt.rev.GreaterThan(Revision{Main: i}) {
-				if tt.remove {
-					wti.Tombstone(tt.key, tt.rev)
-				} else {
-					restore(wti, tt.key, tt.created, tt.rev, tt.ver)
-				}
-			}
-		}
-		if !ti.Equal(wti) {
-			t.Errorf("#%d: not equal ti", i)
-		}
-	}
-}
+		require.Equalf(t, afterCompacts[j].keep, keep, "#%d: keep(%d) != expected", i, i)
 
-func restore(ti *treeIndex, key []byte, created, modified Revision, ver int64) {
-	keyi := &keyIndex{key: key}
+		nti := newTreeIndex(zaptest.NewLogger(t)).(*treeIndex)
+		for k := range afterCompacts[j].keyIndexes {
+			ki := afterCompacts[j].keyIndexes[k]
+			nti.tree.ReplaceOrInsert(&ki)
+		}
 
-	ti.Lock()
-	defer ti.Unlock()
-	okeyi, _ := ti.tree.Get(keyi)
-	if okeyi == nil {
-		keyi.restore(ti.lg, created, modified, ver)
-		ti.tree.ReplaceOrInsert(keyi)
-		return
+		require.Truef(t, ti.Equal(nti), "#%d: not equal ti", i)
 	}
-	okeyi.put(ti.lg, modified.Main, modified.Sub)
 }

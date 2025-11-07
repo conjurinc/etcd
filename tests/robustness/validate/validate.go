@@ -15,93 +15,144 @@
 package validate
 
 import (
+	"errors"
 	"fmt"
-	"sort"
-	"testing"
+	"math"
+	"time"
 
 	"github.com/anishathalye/porcupine"
-	"github.com/google/go-cmp/cmp"
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/tests/v3/robustness/model"
 	"go.etcd.io/etcd/tests/v3/robustness/report"
 )
 
-// ValidateAndReturnVisualize returns visualize as porcupine.linearizationInfo used to generate visualization is private.
-func ValidateAndReturnVisualize(t *testing.T, lg *zap.Logger, cfg Config, reports []report.ClientReport) (visualize func(basepath string) error) {
-	patchedOperations := patchedOperationHistory(reports)
-	linearizable, visualize := validateLinearizableOperationsAndVisualize(lg, patchedOperations)
-	if linearizable != porcupine.Ok {
-		t.Error("Failed linearization, skipping further validation")
-		return visualize
+var ErrNotEmptyDatabase = errors.New("non empty database at start, required by model used for linearizability validation")
+
+func ValidateAndReturnVisualize(lg *zap.Logger, cfg Config, reports []report.ClientReport, persistedRequests []model.EtcdRequest, timeout time.Duration) (result RobustnessResult) {
+	result.Assumptions = ResultFromError(checkValidationAssumptions(reports))
+	if result.Assumptions.Error() != nil {
+		return result
 	}
-	// TODO: Don't use watch events to get event history.
-	eventHistory, err := mergeWatchEventHistory(reports)
-	if err != nil {
-		t.Errorf("Failed merging watch history to create event history, skipping further validation, err: %s", err)
-		return visualize
+	linearizableOperations, serializableOperations, operationsForVisualization := prepareAndCategorizeOperations(reports)
+	// We are passing in the original reports and linearizableOperations with modified return time.
+	// The reason is that linearizableOperations are those dedicated for linearization, which requires them to have returnTime set to infinity as required by pourcupine.
+	// As for the report, the original report is used so the consumer doesn't need to track what patching was done or not.
+	if len(persistedRequests) != 0 {
+		linearizableOperations = patchLinearizableOperations(linearizableOperations, reports, persistedRequests)
 	}
-	validateWatch(t, lg, cfg, reports, eventHistory)
-	validateSerializableOperations(t, lg, patchedOperations, eventHistory)
-	return visualize
+
+	result.Linearization = validateLinearizableOperationsAndVisualize(lg, linearizableOperations, timeout)
+	result.Linearization.AddToVisualization(operationsForVisualization)
+	// Skip other validations if model is not linearizable, as they are expected to fail too and obfuscate the logs.
+	if result.Linearization.Error() != nil {
+		lg.Info("Skipping other validations as linearization failed")
+		return result
+	}
+	if len(persistedRequests) == 0 {
+		lg.Info("Skipping other validations as persisted requests were empty")
+		return result
+	}
+	replay := model.NewReplay(persistedRequests)
+	result.Watch = validateWatch(lg, cfg, reports, replay)
+	result.Serializable = validateSerializableOperations(lg, serializableOperations, replay)
+	return result
 }
 
 type Config struct {
 	ExpectRevisionUnique bool
 }
 
-func mergeWatchEventHistory(reports []report.ClientReport) ([]model.WatchEvent, error) {
-	type revisionEvents struct {
-		events   []model.WatchEvent
-		revision int64
-		clientId int
+func prepareAndCategorizeOperations(reports []report.ClientReport) (linearizable, serializable, forVisualization []porcupine.Operation) {
+	for _, report := range reports {
+		for _, op := range report.KeyValue {
+			request := op.Input.(model.EtcdRequest)
+			response := op.Output.(model.MaybeEtcdResponse)
+			if isSerializable(request, response) {
+				serializable = append(serializable, op)
+			}
+			// Operations that will not be linearized need to be added separately to the visualization.
+			if !isLinearizable(request, response) {
+				forVisualization = append(forVisualization, op)
+				continue
+			}
+			// For linearization, we set the return time of failed requests to MaxInt64.
+			// Failed requests can still be persisted, however we don't know when the request has taken effect.
+			if response.Error != "" {
+				op.Return = math.MaxInt64
+			}
+			linearizable = append(linearizable, op)
+		}
 	}
-	revisionToEvents := map[int64]revisionEvents{}
-	var lastClientId = 0
-	var lastRevision int64
-	events := []model.WatchEvent{}
+	return linearizable, serializable, forVisualization
+}
+
+func isLinearizable(request model.EtcdRequest, response model.MaybeEtcdResponse) bool {
+	// Cannot test response for request without side effect.
+	if request.IsRead() && response.Error != "" {
+		return false
+	}
+	// Defragment is not linearizable
+	if request.Type == model.Defragment {
+		return false
+	}
+	return true
+}
+
+func isSerializable(request model.EtcdRequest, response model.MaybeEtcdResponse) bool {
+	// Cannot test response for request without side effect.
+	if request.IsRead() && response.Error != "" {
+		return false
+	}
+	// Test range requests about stale revision
+	if request.Type == model.Range && request.Range.Revision != 0 {
+		return true
+	}
+	return false
+}
+
+func checkValidationAssumptions(reports []report.ClientReport) error {
+	err := validateEmptyDatabaseAtStart(reports)
+	if err != nil {
+		return err
+	}
+
+	err = validateNonConcurrentClientRequests(reports)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateEmptyDatabaseAtStart(reports []report.ClientReport) error {
+	if len(reports) == 0 {
+		return nil
+	}
 	for _, r := range reports {
-		for _, op := range r.Watch {
-			for _, resp := range op.Responses {
-				for _, event := range resp.Events {
-					if event.Revision == lastRevision && lastClientId == r.ClientId {
-						events = append(events, event)
-					} else {
-						if prev, found := revisionToEvents[lastRevision]; found {
-							// This assumes that there are txn that would be observed differently by two watches.
-							// TODO: Implement merging events from multiple watches about single revision based on operations.
-							if diff := cmp.Diff(prev.events, events); diff != "" {
-								return nil, fmt.Errorf("events between clients %d and %d don't match, revision: %d, diff: %s", prev.clientId, lastClientId, lastRevision, diff)
-							}
-						} else {
-							revisionToEvents[lastRevision] = revisionEvents{clientId: lastClientId, events: events, revision: lastRevision}
-						}
-						lastClientId = r.ClientId
-						lastRevision = event.Revision
-						events = []model.WatchEvent{event}
-					}
-				}
+		for _, op := range r.KeyValue {
+			request := op.Input.(model.EtcdRequest)
+			response := op.Output.(model.MaybeEtcdResponse)
+			if response.Revision == 1 && request.IsRead() {
+				return nil
 			}
 		}
 	}
-	if prev, found := revisionToEvents[lastRevision]; found {
-		if diff := cmp.Diff(prev.events, events); diff != "" {
-			return nil, fmt.Errorf("events between clients %d and %d don't match, revision: %d, diff: %s", prev.clientId, lastClientId, lastRevision, diff)
-		}
-	} else {
-		revisionToEvents[lastRevision] = revisionEvents{clientId: lastClientId, events: events, revision: lastRevision}
-	}
+	return ErrNotEmptyDatabase
+}
 
-	var allRevisionEvents []revisionEvents
-	for _, revEvents := range revisionToEvents {
-		allRevisionEvents = append(allRevisionEvents, revEvents)
+func validateNonConcurrentClientRequests(reports []report.ClientReport) error {
+	lastClientRequestReturn := map[int]int64{}
+	for _, r := range reports {
+		for _, op := range r.KeyValue {
+			lastRequest := lastClientRequestReturn[op.ClientId]
+			if op.Call <= lastRequest {
+				return fmt.Errorf("client %d has concurrent request, required for operation linearization", op.ClientId)
+			}
+			if op.Return <= op.Call {
+				return fmt.Errorf("operation %v ends before it starts, required for operation linearization", op)
+			}
+			lastClientRequestReturn[op.ClientId] = op.Return
+		}
 	}
-	sort.Slice(allRevisionEvents, func(i, j int) bool {
-		return allRevisionEvents[i].revision < allRevisionEvents[j].revision
-	})
-	var eventHistory []model.WatchEvent
-	for _, revEvents := range allRevisionEvents {
-		eventHistory = append(eventHistory, revEvents.events...)
-	}
-	return eventHistory, nil
+	return nil
 }

@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"testing"
 
 	"github.com/anishathalye/porcupine"
 	"go.uber.org/zap"
@@ -31,7 +30,7 @@ import (
 )
 
 type ClientReport struct {
-	ClientId int
+	ClientID int
 	KeyValue []porcupine.Operation
 	Watch    []model.WatchOperation
 }
@@ -46,23 +45,32 @@ func (r ClientReport) WatchEventCount() int {
 	return count
 }
 
-func persistClientReports(t *testing.T, lg *zap.Logger, path string, reports []ClientReport) {
+func persistClientReports(lg *zap.Logger, path string, reports []ClientReport) error {
 	sort.Slice(reports, func(i, j int) bool {
-		return reports[i].ClientId < reports[j].ClientId
+		return reports[i].ClientID < reports[j].ClientID
 	})
 	for _, r := range reports {
-		clientDir := filepath.Join(path, fmt.Sprintf("client-%d", r.ClientId))
-		err := os.MkdirAll(clientDir, 0700)
-		if err != nil {
-			t.Fatal(err)
+		clientDir := filepath.Join(path, fmt.Sprintf("client-%d", r.ClientID))
+		if err := os.MkdirAll(clientDir, 0o700); err != nil {
+			return err
 		}
+
 		if len(r.Watch) != 0 {
-			persistWatchOperations(t, lg, filepath.Join(clientDir, "watch.json"), r.Watch)
+			if err := persistWatchOperations(lg, filepath.Join(clientDir, "watch.json"), r.Watch); err != nil {
+				return err
+			}
+		} else {
+			lg.Info("no watch operations for client, skip persisting", zap.Int("client-id", r.ClientID))
 		}
 		if len(r.KeyValue) != 0 {
-			persistKeyValueOperations(t, lg, filepath.Join(clientDir, "operations.json"), r.KeyValue)
+			if err := persistKeyValueOperations(lg, filepath.Join(clientDir, "operations.json"), r.KeyValue); err != nil {
+				return err
+			}
+		} else {
+			lg.Info("no KV operations for client, skip persisting", zap.Int("client-id", r.ClientID))
 		}
 	}
+	return nil
 }
 
 func LoadClientReports(path string) ([]ClientReport, error) {
@@ -82,12 +90,12 @@ func LoadClientReports(path string) ([]ClientReport, error) {
 			if err != nil {
 				return nil, err
 			}
-			r.ClientId = id
+			r.ClientID = id
 			reports = append(reports, r)
 		}
 	}
 	sort.Slice(reports, func(i, j int) bool {
-		return reports[i].ClientId < reports[j].ClientId
+		return reports[i].ClientID < reports[j].ClientID
 	})
 	return reports, nil
 }
@@ -112,7 +120,7 @@ func loadWatchOperations(path string) (operations []model.WatchOperation, err er
 		}
 		return nil, fmt.Errorf("failed to open watch operation file: %q, err: %w", path, err)
 	}
-	file, err := os.OpenFile(path, os.O_RDONLY, 0755)
+	file, err := os.OpenFile(path, os.O_RDONLY, 0o755)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open watch operation file: %q, err: %w", path, err)
 	}
@@ -135,17 +143,17 @@ func loadKeyValueOperations(path string) (operations []porcupine.Operation, err 
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to open watch operation file: %q, err: %w", path, err)
+		return nil, fmt.Errorf("failed to open KV operation file: %q, err: %w", path, err)
 	}
-	file, err := os.OpenFile(path, os.O_RDONLY, 0755)
+	file, err := os.OpenFile(path, os.O_RDONLY, 0o755)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open watch operation file: %q, err: %w", path, err)
+		return nil, fmt.Errorf("failed to open KV operation file: %q, err: %w", path, err)
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(file)
 	for decoder.More() {
 		var operation struct {
-			ClientId int
+			ClientID int
 			Input    model.EtcdRequest
 			Call     int64
 			Output   model.MaybeEtcdResponse
@@ -153,10 +161,10 @@ func loadKeyValueOperations(path string) (operations []porcupine.Operation, err 
 		}
 		err = decoder.Decode(&operation)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode watch operation, err: %w", err)
+			return nil, fmt.Errorf("failed to decode KV operation, err: %w", err)
 		}
 		operations = append(operations, porcupine.Operation{
-			ClientId: operation.ClientId,
+			ClientId: operation.ClientID,
 			Input:    operation.Input,
 			Call:     operation.Call,
 			Output:   operation.Output,
@@ -166,36 +174,51 @@ func loadKeyValueOperations(path string) (operations []porcupine.Operation, err 
 	return operations, nil
 }
 
-func persistWatchOperations(t *testing.T, lg *zap.Logger, path string, responses []model.WatchOperation) {
+func persistWatchOperations(lg *zap.Logger, path string, responses []model.WatchOperation) error {
 	lg.Info("Saving watch operations", zap.String("path", path))
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o755)
 	if err != nil {
-		t.Errorf("Failed to save watch operations: %v", err)
-		return
+		return fmt.Errorf("failed to save watch operations: %w", err)
 	}
 	defer file.Close()
-	encoder := json.NewEncoder(file)
 	for _, resp := range responses {
-		err := encoder.Encode(resp)
+		data, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
-			t.Errorf("Failed to encode operation: %v", err)
+			return fmt.Errorf("failed to encode operation: %w", err)
 		}
+		file.Write(data)
+		file.WriteString("\n")
 	}
+	return nil
 }
 
-func persistKeyValueOperations(t *testing.T, lg *zap.Logger, path string, operations []porcupine.Operation) {
+func persistKeyValueOperations(lg *zap.Logger, path string, operations []porcupine.Operation) error {
 	lg.Info("Saving operation history", zap.String("path", path))
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o755)
 	if err != nil {
-		t.Errorf("Failed to save operation history: %v", err)
-		return
+		return fmt.Errorf("Failed to save KV operation history: %w", err)
 	}
 	defer file.Close()
-	encoder := json.NewEncoder(file)
 	for _, op := range operations {
-		err := encoder.Encode(op)
+		data, err := json.MarshalIndent(op, "", "  ")
 		if err != nil {
-			t.Errorf("Failed to encode operation: %v", err)
+			return fmt.Errorf("Failed to encode KV operation: %w", err)
+		}
+		file.Write(data)
+		file.WriteString("\n")
+	}
+	return nil
+}
+
+func OperationsMaxRevision(reports []ClientReport) int64 {
+	var maxRevision int64
+	for _, r := range reports {
+		for _, op := range r.KeyValue {
+			resp := op.Output.(model.MaybeEtcdResponse)
+			if resp.Revision > maxRevision {
+				maxRevision = resp.Revision
+			}
 		}
 	}
+	return maxRevision
 }

@@ -15,6 +15,7 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -28,17 +29,20 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
-	"go.etcd.io/etcd/pkg/v3/flags"
 )
 
-var epClusterEndpoints bool
-var epHashKVRev int64
+var (
+	epClusterEndpoints bool
+	epHashKVRev        int64
+)
 
 // NewEndpointCommand returns the cobra command for "endpoint".
 func NewEndpointCommand() *cobra.Command {
 	ec := &cobra.Command{
-		Use:   "endpoint <subcommand>",
-		Short: "Endpoint related commands",
+		Use:     "endpoint <subcommand>",
+		Short:   "Endpoint related commands. Use `etcdctl endpoint --help` to see subcommands",
+		Long:    "Endpoint related commands",
+		GroupID: groupClusterMaintenanceID,
 	}
 
 	ec.PersistentFlags().BoolVar(&epClusterEndpoints, "cluster", false, "use all endpoints from the cluster member list")
@@ -93,24 +97,14 @@ func epHealthCommandFunc(cmd *cobra.Command, args []string) {
 	if err != nil {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
-	flags.SetPflagsFromEnv(lg, "ETCDCTL", cmd.InheritedFlags())
-	initDisplayFromCmd(cmd)
 
-	sec := secureCfgFromCmd(cmd)
-	dt := dialTimeoutFromCmd(cmd)
-	ka := keepAliveTimeFromCmd(cmd)
-	kat := keepAliveTimeoutFromCmd(cmd)
-	auth := authCfgFromCmd(cmd)
+	cfgSpec := clientConfigFromCmd(cmd)
+
 	var cfgs []*clientv3.Config
 	for _, ep := range endpointsFromCluster(cmd) {
-		cfg, err := clientv3.NewClientConfig(&clientv3.ConfigSpec{
-			Endpoints:        []string{ep},
-			DialTimeout:      dt,
-			KeepAliveTime:    ka,
-			KeepAliveTimeout: kat,
-			Secure:           sec,
-			Auth:             auth,
-		}, lg)
+		cloneCfgSpec := cfgSpec.Clone()
+		cloneCfgSpec.Endpoints = []string{ep}
+		cfg, err := clientv3.NewClientConfig(cloneCfgSpec, lg)
 		if err != nil {
 			cobrautl.ExitWithError(cobrautl.ExitBadArgs, err)
 		}
@@ -137,7 +131,7 @@ func epHealthCommandFunc(cmd *cobra.Command, args []string) {
 			_, err = cli.Get(ctx, "health")
 			eh := epHealth{Ep: ep, Health: false, Took: time.Since(st).String()}
 			// permission denied is OK since proposal goes through consensus to get it
-			if err == nil || err == rpctypes.ErrPermissionDenied {
+			if err == nil || errors.Is(err, rpctypes.ErrPermissionDenied) {
 				eh.Health = true
 			} else {
 				eh.Error = err.Error()
@@ -268,6 +262,7 @@ func endpointsFromCluster(cmd *cobra.Command) []string {
 	}
 	// exclude auth for not asking needless password (MemberList() doesn't need authentication)
 	lg, _ := logutil.CreateDefaultZapLogger(zap.InfoLevel)
+
 	cfg, err := clientv3.NewClientConfig(&clientv3.ConfigSpec{
 		Endpoints:        eps,
 		DialTimeout:      dt,
@@ -290,7 +285,7 @@ func endpointsFromCluster(cmd *cobra.Command) []string {
 	}()
 	membs, err := c.MemberList(ctx)
 	if err != nil {
-		err = fmt.Errorf("failed to fetch endpoints from etcd cluster member list: %v", err)
+		err = fmt.Errorf("failed to fetch endpoints from etcd cluster member list: %w", err)
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
 

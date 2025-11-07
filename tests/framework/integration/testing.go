@@ -18,7 +18,7 @@ import (
 	"os"
 	"testing"
 
-	grpc_logsettable "github.com/grpc-ecosystem/go-grpc-middleware/logging/settable"
+	grpclogsettable "github.com/grpc-ecosystem/go-grpc-middleware/logging/settable"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zapgrpc"
@@ -31,11 +31,13 @@ import (
 	gofail "go.etcd.io/gofail/runtime"
 )
 
-var grpc_logger grpc_logsettable.SettableLoggerV2
-var insideTestContext bool
+var (
+	grpcLogger        grpclogsettable.SettableLoggerV2
+	insideTestContext bool
+)
 
 func init() {
-	grpc_logger = grpc_logsettable.ReplaceGrpcLoggerV2()
+	grpcLogger = grpclogsettable.ReplaceGrpcLoggerV2()
 }
 
 type testOptions struct {
@@ -118,13 +120,13 @@ func BeforeTest(t testutil.TB, opts ...TestOption) {
 
 	// Registering cleanup early, such it will get executed even if the helper fails.
 	t.Cleanup(func() {
-		grpc_logger.Reset()
+		grpcLogger.Reset()
 		insideTestContext = previousInsideTestContext
 		os.Chdir(previousWD)
 		revertFunc()
 	})
 
-	grpc_logger.Set(zapgrpc.NewLogger(zaptest.NewLogger(t).Named("grpc")))
+	grpcLogger.Set(zapgrpc.NewLogger(zaptest.NewLogger(t).Named("grpc")))
 	insideTestContext = true
 
 	os.Chdir(t.TempDir())
@@ -136,18 +138,18 @@ func assertInTestContext(t testutil.TB) {
 	}
 }
 
-func NewEmbedConfig(t testing.TB, name string) *embed.Config {
+func NewEmbedConfig(tb testing.TB, name string) *embed.Config {
 	cfg := embed.NewConfig()
 	cfg.Name = name
-	lg := zaptest.NewLogger(t, zaptest.Level(zapcore.InfoLevel)).Named(cfg.Name)
+	lg := zaptest.NewLogger(tb, zaptest.Level(zapcore.InfoLevel)).Named(cfg.Name)
 	cfg.ZapLoggerBuilder = embed.NewZapLoggerBuilder(lg)
-	cfg.Dir = t.TempDir()
+	cfg.Dir = tb.TempDir()
 	return cfg
 }
 
-func NewClient(t testing.TB, cfg clientv3.Config) (*clientv3.Client, error) {
+func NewClient(tb testing.TB, cfg clientv3.Config) (*clientv3.Client, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = zaptest.NewLogger(t).Named("client")
+		cfg.Logger = zaptest.NewLogger(tb).Named("client")
 	}
 	return clientv3.New(cfg)
 }

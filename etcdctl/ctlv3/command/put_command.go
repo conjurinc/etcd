@@ -56,7 +56,8 @@ For example,
 $ cat file | put <key>
 will store the content of the file to <key>.
 `,
-		Run: putCommandFunc,
+		Run:     putCommandFunc,
+		GroupID: groupKVID,
 	}
 	cmd.Flags().StringVar(&leaseStr, "lease", "0", "lease ID (in hexadecimal) to attach to the key")
 	cmd.Flags().BoolVar(&putPrevKV, "prev-kv", false, "return the previous key-value pair before modification")
@@ -99,7 +100,7 @@ func getPutOp(args []string) (string, string, []clientv3.OpOption) {
 
 	id, err := strconv.ParseInt(leaseStr, 16, 64)
 	if err != nil {
-		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad lease ID (%v), expecting ID in Hex", err))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad lease ID (%w), expecting ID in Hex", err))
 	}
 
 	var opts []clientv3.OpOption

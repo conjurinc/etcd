@@ -49,62 +49,101 @@ func TestFailoverOnDefrag(t *testing.T) {
 		gRPCDialOptions []grpc.DialOption
 
 		// common assertion
-		expectedMinTotalRequestsCount int
+		expectedMinQPS float64
 		// happy case assertion
-		expectedMaxFailedRequestsCount int
+		expectedMaxFailureRate float64
 		// negative case assertion
-		expectedMinFailedRequestsCount int
+		expectedMinFailureRate float64
 	}{
 		{
 			name: "defrag failover happy case",
 			clusterOptions: []e2e.EPClusterOption{
 				e2e.WithClusterSize(3),
-				e2e.WithExperimentalStopGRPCServiceOnDefrag(true),
+				e2e.WithServerFeatureGate("StopGRPCServiceOnDefrag", true),
 				e2e.WithGoFailEnabled(true),
 			},
 			gRPCDialOptions: []grpc.DialOption{
 				grpc.WithDisableServiceConfig(),
 				grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy": "round_robin", "healthCheckConfig": {"serviceName": ""}}`),
 			},
-			expectedMinTotalRequestsCount:  300,
-			expectedMaxFailedRequestsCount: 5,
+			expectedMinQPS:         20,
+			expectedMaxFailureRate: 0.01,
 		},
 		{
 			name: "defrag blocks one-third of requests with stopGRPCServiceOnDefrag set to false",
 			clusterOptions: []e2e.EPClusterOption{
 				e2e.WithClusterSize(3),
-				e2e.WithExperimentalStopGRPCServiceOnDefrag(false),
+				e2e.WithServerFeatureGate("StopGRPCServiceOnDefrag", false),
 				e2e.WithGoFailEnabled(true),
 			},
 			gRPCDialOptions: []grpc.DialOption{
 				grpc.WithDisableServiceConfig(),
 				grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy": "round_robin", "healthCheckConfig": {"serviceName": ""}}`),
 			},
-			expectedMinTotalRequestsCount:  300,
-			expectedMinFailedRequestsCount: 90,
+			expectedMinQPS:         20,
+			expectedMinFailureRate: 0.25,
 		},
 		{
 			name: "defrag blocks one-third of requests with stopGRPCServiceOnDefrag set to true and client health check disabled",
 			clusterOptions: []e2e.EPClusterOption{
 				e2e.WithClusterSize(3),
-				e2e.WithExperimentalStopGRPCServiceOnDefrag(true),
+				e2e.WithServerFeatureGate("StopGRPCServiceOnDefrag", true),
 				e2e.WithGoFailEnabled(true),
 			},
-			expectedMinTotalRequestsCount:  300,
-			expectedMinFailedRequestsCount: 90,
+			expectedMinQPS:         20,
+			expectedMinFailureRate: 0.25,
+		},
+		{
+			name: "defrag failover happy case with feature gate",
+			clusterOptions: []e2e.EPClusterOption{
+				e2e.WithClusterSize(3),
+				e2e.WithServerFeatureGate("StopGRPCServiceOnDefrag", true),
+				e2e.WithGoFailEnabled(true),
+			},
+			gRPCDialOptions: []grpc.DialOption{
+				grpc.WithDisableServiceConfig(),
+				grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy": "round_robin", "healthCheckConfig": {"serviceName": ""}}`),
+			},
+			expectedMinQPS:         20,
+			expectedMaxFailureRate: 0.01,
+		},
+		{
+			name: "defrag blocks one-third of requests with StopGRPCServiceOnDefrag feature gate set to false",
+			clusterOptions: []e2e.EPClusterOption{
+				e2e.WithClusterSize(3),
+				e2e.WithServerFeatureGate("StopGRPCServiceOnDefrag", false),
+				e2e.WithGoFailEnabled(true),
+			},
+			gRPCDialOptions: []grpc.DialOption{
+				grpc.WithDisableServiceConfig(),
+				grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy": "round_robin", "healthCheckConfig": {"serviceName": ""}}`),
+			},
+			expectedMinQPS:         20,
+			expectedMinFailureRate: 0.25,
+		},
+		{
+			name: "defrag blocks one-third of requests with StopGRPCServiceOnDefrag feature gate set to true and client health check disabled",
+			clusterOptions: []e2e.EPClusterOption{
+				e2e.WithClusterSize(3),
+				e2e.WithServerFeatureGate("StopGRPCServiceOnDefrag", true),
+				e2e.WithGoFailEnabled(true),
+			},
+			expectedMinQPS:         20,
+			expectedMinFailureRate: 0.25,
 		},
 	}
 
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			e2e.BeforeTest(t)
-			clus, cerr := e2e.NewEtcdProcessCluster(context.TODO(), t, tc.clusterOptions...)
+			clus, cerr := e2e.NewEtcdProcessCluster(t.Context(), t, tc.clusterOptions...)
 			require.NoError(t, cerr)
 			t.Cleanup(func() { clus.Stop() })
 
 			endpoints := clus.EndpointsGRPC()
 
 			requestVolume, successfulRequestCount := 0, 0
+			start := time.Now()
 			g := new(errgroup.Group)
 			g.Go(func() (lastErr error) {
 				clusterClient, cerr := clientv3.New(clientv3.Config{
@@ -126,7 +165,7 @@ func TestFailoverOnDefrag(t *testing.T) {
 						return lastErr
 					default:
 					}
-					getContext, cancel := context.WithTimeout(context.Background(), requestTimeout)
+					getContext, cancel := context.WithTimeout(t.Context(), requestTimeout)
 					_, err := clusterClient.Get(getContext, "health")
 					cancel()
 					requestVolume++
@@ -143,21 +182,23 @@ func TestFailoverOnDefrag(t *testing.T) {
 			if err != nil {
 				t.Logf("etcd client failed to fail over, error (%v)", err)
 			}
-			t.Logf("request failure rate is %.2f%%, traffic volume successfulRequestCount %d requests, total %d requests", (1-float64(successfulRequestCount)/float64(requestVolume))*100, successfulRequestCount, requestVolume)
 
-			require.GreaterOrEqual(t, requestVolume, tc.expectedMinTotalRequestsCount)
-			failedRequestCount := requestVolume - successfulRequestCount
-			if tc.expectedMaxFailedRequestsCount != 0 {
-				require.LessOrEqual(t, failedRequestCount, tc.expectedMaxFailedRequestsCount)
+			qps := float64(requestVolume) / float64(time.Since(start)) * float64(time.Second)
+			failureRate := 1 - float64(successfulRequestCount)/float64(requestVolume)
+			t.Logf("request failure rate is %.2f%%, qps is %.2f requests/second", failureRate*100, qps)
+
+			require.GreaterOrEqual(t, qps, tc.expectedMinQPS)
+			if tc.expectedMaxFailureRate != 0.0 {
+				require.LessOrEqual(t, failureRate, tc.expectedMaxFailureRate)
 			}
-			if tc.expectedMinFailedRequestsCount != 0 {
-				require.GreaterOrEqual(t, failedRequestCount, tc.expectedMinFailedRequestsCount)
+			if tc.expectedMinFailureRate != 0.0 {
+				require.GreaterOrEqual(t, failureRate, tc.expectedMinFailureRate)
 			}
 		})
 	}
 }
 
 func triggerDefrag(t *testing.T, member e2e.EtcdProcess) {
-	require.NoError(t, member.Failpoints().SetupHTTP(context.Background(), "defragBeforeCopy", `sleep("10s")`))
-	require.NoError(t, member.Etcdctl().Defragment(context.Background(), config.DefragOption{Timeout: time.Minute}))
+	require.NoError(t, member.Failpoints().SetupHTTP(t.Context(), "defragBeforeCopy", `sleep("10s")`))
+	require.NoError(t, member.Etcdctl().Defragment(t.Context(), config.DefragOption{Timeout: time.Minute}))
 }

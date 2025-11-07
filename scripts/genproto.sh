@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #
 # Generate all etcd protobuf bindings.
 # Run from repository root directory named etcd.
@@ -12,11 +25,55 @@ if ! [[ "$0" =~ scripts/genproto.sh ]]; then
   exit 255
 fi
 
+if [ -z "${OS:-}" ]; then
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+fi
+
+# Set SED variable
+if LANG=C sed --help 2>&1 | grep -q GNU; then
+  SED="sed"
+elif command -v gsed &>/dev/null; then
+  SED="gsed"
+elif [ "$OS" == "darwin" ]; then
+  echo "You are on Mac, running: brew install gnu-sed"
+  brew install gnu-sed
+  SED="/opt/homebrew/opt/gnu-sed/libexec/gnubin/sed"
+else
+  echo "Failed to find GNU sed as sed or gsed." >&2
+  exit 1
+fi
+
 source ./scripts/test_lib.sh
 
 if [[ $(protoc --version | cut -f2 -d' ') != "3.20.3" ]]; then
-  echo "could not find protoc 3.20.3, is it installed + in PATH?"
-  exit 255
+  echo "Could not find protoc 3.20.3, installing now..."
+
+  arch=$(go env GOARCH)
+
+  case ${arch} in
+    "amd64") file="x86_64" ;;
+    "arm64") file="aarch_64" ;;
+    *)
+      echo "Unsupported architecture: ${arch}"
+      exit 255
+      ;;
+  esac
+
+  protoc_download_file="protoc-3.20.3-linux-${file}.zip"
+  if [ "$OS" == "darwin" ]; then
+    # protoc-3.20.3 does not have pre-built binaries for darwin_arm64. Thanks to Rosetta, we could use x86_64 binary.
+    protoc_download_file="protoc-3.20.3-osx-x86_64.zip"
+  fi
+  download_url="https://github.com/protocolbuffers/protobuf/releases/download/v3.20.3/${protoc_download_file}"
+  echo "Running on ${OS} ${arch}. Downloading ${protoc_download_file}"
+  mkdir -p bin
+  wget ${download_url} && unzip -p ${protoc_download_file} bin/protoc > tmpFile && mv tmpFile bin/protoc
+  rm ${protoc_download_file}
+  chmod +x bin/protoc
+  PATH=$PATH:$(pwd)/bin
+  export PATH
+  echo "Now running: $(protoc --version)"
+
 fi
 
 GOFAST_BIN=$(tool_get_bin github.com/gogo/protobuf/protoc-gen-gofast)
@@ -98,14 +155,14 @@ for pb in api/etcdserverpb/rpc server/etcdserver/api/v3lock/v3lockpb/v3lock serv
   pkg=$(basename "${pkgpath}")
   gwfile="${pb}.pb.gw.go"
 
-  run sed -i -E "s#package $pkg#package gw#g" "${gwfile}"
-  run sed -i -E "s#import \\(#import \\(\"go.etcd.io/etcd/${pkgpath}\"#g" "${gwfile}"
-  run sed -i -E "s#([ (])([a-zA-Z0-9_]*(Client|Server|Request)([^(]|$))#\\1${pkg}.\\2#g" "${gwfile}"
-  run sed -i -E "s# (New[a-zA-Z0-9_]*Client\\()# ${pkg}.\\1#g" "${gwfile}"
-  run sed -i -E "s|go.etcd.io/etcd|go.etcd.io/etcd/v3|g" "${gwfile}"
-  run sed -i -E "s|go.etcd.io/etcd/v3/api|go.etcd.io/etcd/api/v3|g" "${gwfile}"
-  run sed -i -E "s|go.etcd.io/etcd/v3/server|go.etcd.io/etcd/server/v3|g" "${gwfile}"
-  
+  run ${SED?} -i -E "s#package $pkg#package gw#g" "${gwfile}"
+  run ${SED?} -i -E "s#import \\(#import \\(\"go.etcd.io/etcd/${pkgpath}\"#g" "${gwfile}"
+  run ${SED?} -i -E "s#([ (])([a-zA-Z0-9_]*(Client|Server|Request)([^(]|$))#\\1${pkg}.\\2#g" "${gwfile}"
+  run ${SED?} -i -E "s# (New[a-zA-Z0-9_]*Client\\()# ${pkg}.\\1#g" "${gwfile}"
+  run ${SED?} -i -E "s|go.etcd.io/etcd|go.etcd.io/etcd/v3|g" "${gwfile}"
+  run ${SED?} -i -E "s|go.etcd.io/etcd/v3/api|go.etcd.io/etcd/api/v3|g" "${gwfile}"
+  run ${SED?} -i -E "s|go.etcd.io/etcd/v3/server|go.etcd.io/etcd/server/v3|g" "${gwfile}"
+
   run go fmt "${gwfile}"
 
   gwdir="${pkgpath}/gw/"
@@ -129,17 +186,17 @@ for pb in api/etcdserverpb/rpc server/etcdserver/api/v3lock/v3lockpb/v3lock serv
   #  import (
   # +       protov1 "github.com/golang/protobuf/proto"
   # +
-  run sed -i -E "s|import \(|import \(\n\tprotov1 \"github.com/golang/protobuf/proto\"\n|g" "${gwfile}"
+  run ${SED?} -i -E "s|import \(|import \(\n\tprotov1 \"github.com/golang/protobuf/proto\"\n|g" "${gwfile}"
 
   # Changes something like below,
   # - return msg, metadata, err
   # + return protov1.MessageV2(msg), metadata, err
-  run sed -i -E "s|return msg, metadata, err|return protov1.MessageV2\(msg\), metadata, err|g" "${gwfile}"
+  run ${SED?} -i -E "s|return msg, metadata, err|return protov1.MessageV2\(msg\), metadata, err|g" "${gwfile}"
 
   # Changes something like below,
   # - if err := marshaler.NewDecoder(newReader()).Decode(&protoReq); err != nil && err != io.EOF {
   # + if err := marshaler.NewDecoder(newReader()).Decode(protov1.MessageV2(&protoReq)); err != nil && err != io.EOF {
-  run sed -i -E "s|Decode\(\&protoReq\)|Decode\(protov1\.MessageV2\(\&protoReq\)\)|g" "${gwfile}"
+  run ${SED?} -i -E "s|Decode\(\&protoReq\)|Decode\(protov1\.MessageV2\(\&protoReq\)\)|g" "${gwfile}"
 
   # Changes something like below,
   # - forward_Lease_LeaseKeepAlive_0(annotatedContext, mux, outboundMarshaler, w, req, func() (proto.Message, error) { return resp.Recv() }, mux.GetForwardResponseOptions()...)
@@ -147,7 +204,7 @@ for pb in api/etcdserverpb/rpc server/etcdserver/api/v3lock/v3lockpb/v3lock serv
   # +   m1, err := resp.Recv()
   # +   return protov1.MessageV2(m1), err
   # + }, mux.GetForwardResponseOptions()...)
-  run sed -i -E "s|return resp.Recv\(\)|\n\t\t\tm1, err := resp.Recv\(\)\n\t\t\treturn protov1.MessageV2\(m1\), err\n\t\t|g" "${gwfile}"
+  run ${SED?} -i -E "s|return resp.Recv\(\)|\n\t\t\tm1, err := resp.Recv\(\)\n\t\t\treturn protov1.MessageV2\(m1\), err\n\t\t|g" "${gwfile}"
 
   run go fmt "${gwfile}"
 done
@@ -168,7 +225,7 @@ title: API reference
 This API reference is autogenerated from the named \`.proto\` files." || exit 2
 
   # remove the first 3 lines of the doc as an empty --title adds '### ' to the top of the file.
-  run sed -i -e 1,3d ${API_REFERENCE_FILE}
+  run ${SED?} -i -e 1,3d ${API_REFERENCE_FILE}
 
   # API reference: concurrency
   API_REFERENCE_CONCURRENCY_FILE="Documentation/dev-guide/api_concurrency_reference_v3.md"
@@ -182,7 +239,7 @@ title: \"API reference: concurrency\"
 This API reference is autogenerated from the named \`.proto\` files." || exit 2
 
   # remove the first 3 lines of the doc as an empty --title adds '### ' to the top of the file.
-  run sed -i -e 1,3d ${API_REFERENCE_CONCURRENCY_FILE}
+  run ${SED?} -i -e 1,3d ${API_REFERENCE_CONCURRENCY_FILE}
 
   log_success "protodoc is finished."
   log_warning -e "\\nThe API references have NOT been automatically published on the website."

@@ -35,8 +35,10 @@ var (
 // NewMemberCommand returns the cobra command for "member".
 func NewMemberCommand() *cobra.Command {
 	mc := &cobra.Command{
-		Use:   "member <subcommand>",
-		Short: "Membership related commands",
+		Use:     "member <subcommand>",
+		Short:   "Membership related commands. Use `etcdctl member --help` to see subcommands",
+		Long:    "Membership related commands",
+		GroupID: groupClusterMaintenanceID,
 	}
 
 	mc.AddCommand(NewMemberAddCommand())
@@ -188,7 +190,7 @@ func memberRemoveCommandFunc(cmd *cobra.Command, args []string) {
 
 	id, err := strconv.ParseUint(args[0], 16, 64)
 	if err != nil {
-		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%v), expecting ID in Hex", err))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%w), expecting ID in Hex", err))
 	}
 
 	ctx, cancel := commandCtx(cmd)
@@ -208,7 +210,7 @@ func memberUpdateCommandFunc(cmd *cobra.Command, args []string) {
 
 	id, err := strconv.ParseUint(args[0], 16, 64)
 	if err != nil {
-		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%v), expecting ID in Hex", err))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%w), expecting ID in Hex", err))
 	}
 
 	if len(memberPeerURLs) == 0 {
@@ -251,7 +253,7 @@ func memberPromoteCommandFunc(cmd *cobra.Command, args []string) {
 
 	id, err := strconv.ParseUint(args[0], 16, 64)
 	if err != nil {
-		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%v), expecting ID in Hex", err))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%w), expecting ID in Hex", err))
 	}
 
 	ctx, cancel := commandCtx(cmd)

@@ -17,8 +17,11 @@ package common
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/api/v3/authpb"
@@ -93,6 +96,29 @@ func createUsers(c interfaces.Client, users []authUser) error {
 	return nil
 }
 
+func createSignedJWT(keyPath, alg, username string, authRevision uint64) (string, error) {
+	signMethod := jwt.GetSigningMethod(alg)
+
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", err
+	}
+
+	key, err := jwt.ParseRSAPrivateKeyFromPEM(keyBytes)
+	if err != nil {
+		return "", err
+	}
+
+	tk := jwt.NewWithClaims(signMethod,
+		jwt.MapClaims{
+			"username": username,
+			"revision": authRevision,
+			"exp":      time.Now().Add(time.Minute).Unix(),
+		})
+
+	return tk.SignedString(key)
+}
+
 func setupAuth(c interfaces.Client, roles []authRole, users []authUser) error {
 	// create roles
 	if err := createRoles(c, roles); err != nil {
@@ -107,14 +133,37 @@ func setupAuth(c interfaces.Client, roles []authRole, users []authUser) error {
 	return c.AuthEnable(context.TODO())
 }
 
+func setupAuthAndGetRevision(c interfaces.Client, roles []authRole, users []authUser) (uint64, error) {
+	// create roles
+	if err := createRoles(c, roles); err != nil {
+		return 0, err
+	}
+
+	if err := createUsers(c, users); err != nil {
+		return 0, err
+	}
+
+	// This needs to happen before enabling auth for the TestAuthJWTOnly
+	// test case because once auth is enabled we can no longer mint a valid
+	// auth token without the revision, which we won't be able to obtain
+	// without a valid auth token.
+	authrev, err := c.AuthStatus(context.TODO())
+	if err != nil {
+		return 0, err
+	}
+
+	// enable auth
+	return authrev.AuthRevision, c.AuthEnable(context.TODO())
+}
+
 func requireRolePermissionEqual(t *testing.T, expectRole authRole, actual []*authpb.Permission) {
-	require.Equal(t, 1, len(actual))
+	require.Len(t, actual, 1)
 	require.Equal(t, expectRole.permission, clientv3.PermissionType(actual[0].PermType))
 	require.Equal(t, expectRole.key, string(actual[0].Key))
 	require.Equal(t, expectRole.keyEnd, string(actual[0].RangeEnd))
 }
 
 func requireUserRolesEqual(t *testing.T, expectUser authUser, actual []string) {
-	require.Equal(t, 1, len(actual))
+	require.Len(t, actual, 1)
 	require.Equal(t, expectUser.role, actual[0])
 }

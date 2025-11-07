@@ -16,9 +16,9 @@ package mvcc
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	mrand "math/rand"
@@ -198,11 +198,11 @@ func TestStoreRange(t *testing.T) {
 		r    rangeResp
 	}{
 		{
-			indexRangeResp{[][]byte{[]byte("foo")}, []Revision{Revision{Main: 2}}},
+			indexRangeResp{[][]byte{[]byte("foo")}, []Revision{{Main: 2}}},
 			rangeResp{[][]byte{key}, [][]byte{kvb}},
 		},
 		{
-			indexRangeResp{[][]byte{[]byte("foo"), []byte("foo1")}, []Revision{Revision{Main: 2}, Revision{Main: 3}}},
+			indexRangeResp{[][]byte{[]byte("foo"), []byte("foo1")}, []Revision{{Main: 2}, {Main: 3}}},
 			rangeResp{[][]byte{key}, [][]byte{kvb}},
 		},
 	}
@@ -217,7 +217,7 @@ func TestStoreRange(t *testing.T) {
 		b.tx.rangeRespc <- tt.r
 		fi.indexRangeRespc <- tt.idxr
 
-		ret, err := s.Range(context.TODO(), []byte("foo"), []byte("goo"), ro)
+		ret, err := s.Range(t.Context(), []byte("foo"), []byte("goo"), ro)
 		if err != nil {
 			t.Errorf("#%d: err = %v, want nil", i, err)
 		}
@@ -334,7 +334,7 @@ func TestStoreCompact(t *testing.T) {
 	fi := s.kvindex.(*fakeIndex)
 
 	s.currentRev = 3
-	fi.indexCompactRespc <- map[Revision]struct{}{Revision{Main: 1}: {}}
+	fi.indexCompactRespc <- map[Revision]struct{}{{Main: 1}: {}}
 	key1 := newTestRevBytes(Revision{Main: 1})
 	key2 := newTestRevBytes(Revision{Main: 2})
 	b.tx.rangeRespc <- rangeResp{[][]byte{}, [][]byte{}}
@@ -419,7 +419,7 @@ func TestStoreRestore(t *testing.T) {
 	}
 
 	gens := []generation{
-		{created: Revision{Main: 4}, ver: 2, revs: []Revision{Revision{Main: 3}, Revision{Main: 5}}},
+		{created: Revision{Main: 4}, ver: 2, revs: []Revision{{Main: 3}, {Main: 5}}},
 		{created: Revision{Main: 0}, ver: 0, revs: nil},
 	}
 	ki := &keyIndex{key: []byte("foo"), modified: Revision{Main: 5}, generations: gens}
@@ -468,7 +468,7 @@ func TestRestoreDelete(t *testing.T) {
 	defer s.Close()
 	for i := 0; i < 20; i++ {
 		ks := fmt.Sprintf("foo-%d", i)
-		r, err := s.Range(context.TODO(), []byte(ks), nil, RangeOptions{})
+		r, err := s.Range(t.Context(), []byte(ks), nil, RangeOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -518,7 +518,7 @@ func TestRestoreContinueUnfinishedCompaction(t *testing.T) {
 			// wait for scheduled compaction to be finished
 			time.Sleep(100 * time.Millisecond)
 
-			if _, err := s.Range(context.TODO(), []byte("foo"), nil, RangeOptions{Rev: 1}); err != ErrCompacted {
+			if _, err := s.Range(t.Context(), []byte("foo"), nil, RangeOptions{Rev: 1}); !errors.Is(err, ErrCompacted) {
 				t.Errorf("range on compacted rev error = %v, want %v", err, ErrCompacted)
 			}
 			// check the key in backend is deleted
@@ -562,6 +562,7 @@ func TestHashKVWhenCompacting(t *testing.T) {
 	hashCompactc := make(chan hashKVResult, 1)
 	var wg sync.WaitGroup
 	donec := make(chan struct{})
+	stopc := make(chan struct{})
 
 	// Call HashByRev(10000) in multiple goroutines until donec is closed
 	for i := 0; i < 10; i++ {
@@ -574,6 +575,8 @@ func TestHashKVWhenCompacting(t *testing.T) {
 					t.Error(err)
 				}
 				select {
+				case <-stopc:
+					return
 				case <-donec:
 					return
 				case hashCompactc <- hashKVResult{hash.Hash, hash.CompactRevision}:
@@ -597,6 +600,8 @@ func TestHashKVWhenCompacting(t *testing.T) {
 				if r.hash != revHash[r.compactRev] {
 					t.Errorf("Hashes differ (current %v) != (saved %v)", r.hash, revHash[r.compactRev])
 				}
+			case <-stopc:
+				return
 			case <-donec:
 				return
 			}
@@ -604,9 +609,20 @@ func TestHashKVWhenCompacting(t *testing.T) {
 	}()
 
 	// Compact the store in a goroutine, using RevisionTombstone 9900 to 10000 and close donec when finished
+	wg.Add(1)
 	go func() {
-		defer close(donec)
+		defer func() {
+			close(donec)
+			wg.Done()
+		}()
+
 		for i := 100; i >= 0; i-- {
+			select {
+			case <-stopc:
+				return
+			default:
+			}
+
 			_, err := s.Compact(traceutil.TODO(), int64(rev-i))
 			if err != nil {
 				t.Error(err)
@@ -620,10 +636,14 @@ func TestHashKVWhenCompacting(t *testing.T) {
 
 	select {
 	case <-donec:
+	case <-time.After(20 * time.Second):
+		close(stopc)
 		wg.Wait()
-	case <-time.After(10 * time.Second):
 		testutil.FatalStack(t, "timeout")
 	}
+
+	close(stopc)
+	wg.Wait()
 }
 
 // TestHashKVWithCompactedAndFutureRevisions ensures that HashKV returns a correct hash when called
@@ -644,12 +664,12 @@ func TestHashKVWithCompactedAndFutureRevisions(t *testing.T) {
 	}
 
 	_, _, errFutureRev := s.HashStorage().HashByRev(int64(rev + 1))
-	if errFutureRev != ErrFutureRev {
+	if !errors.Is(errFutureRev, ErrFutureRev) {
 		t.Error(errFutureRev)
 	}
 
 	_, _, errPastRev := s.HashStorage().HashByRev(int64(compactRev - 1))
-	if errPastRev != ErrCompacted {
+	if !errors.Is(errPastRev, ErrCompacted) {
 		t.Error(errPastRev)
 	}
 
@@ -736,7 +756,7 @@ func TestConcurrentReadNotBlockingWrite(t *testing.T) {
 	// readTx2 simulates a short read request
 	readTx2 := s.Read(ConcurrentReadTxMode, traceutil.TODO())
 	ro := RangeOptions{Limit: 1, Rev: 0, Count: false}
-	ret, err := readTx2.Range(context.TODO(), []byte("foo"), nil, ro)
+	ret, err := readTx2.Range(t.Context(), []byte("foo"), nil, ro)
 	if err != nil {
 		t.Fatalf("failed to range: %v", err)
 	}
@@ -753,7 +773,7 @@ func TestConcurrentReadNotBlockingWrite(t *testing.T) {
 	}
 	readTx2.End()
 
-	ret, err = readTx1.Range(context.TODO(), []byte("foo"), nil, ro)
+	ret, err = readTx1.Range(t.Context(), []byte("foo"), nil, ro)
 	if err != nil {
 		t.Fatalf("failed to range: %v", err)
 	}
@@ -820,7 +840,7 @@ func TestConcurrentReadTxAndWrite(t *testing.T) {
 			tx := s.Read(ConcurrentReadTxMode, traceutil.TODO())
 			mu.Unlock()
 			// get all keys in backend store, and compare with wKVs
-			ret, err := tx.Range(context.TODO(), []byte("\x00000000"), []byte("\xffffffff"), RangeOptions{})
+			ret, err := tx.Range(t.Context(), []byte("\x00000000"), []byte("\xffffffff"), RangeOptions{})
 			tx.End()
 			if err != nil {
 				t.Errorf("failed to range keys: %v", err)
@@ -893,11 +913,12 @@ func newTestBucketKeyBytes(rev BucketKey) []byte {
 func newFakeStore(lg *zap.Logger) *store {
 	b := &fakeBackend{&fakeBatchTx{
 		Recorder:   &testutil.RecorderBuffered{},
-		rangeRespc: make(chan rangeResp, 5)}}
+		rangeRespc: make(chan rangeResp, 5),
+	}}
 	s := &store{
 		cfg: StoreConfig{
 			CompactionBatchLimit:    10000,
-			CompactionSleepInterval: minimumBatchInterval,
+			CompactionSleepInterval: defaultCompactionSleepInterval,
 		},
 		b:              b,
 		le:             &lease.FakeLessor{},
@@ -909,7 +930,7 @@ func newFakeStore(lg *zap.Logger) *store {
 		lg:             lg,
 	}
 	s.ReadView, s.WriteView = &readView{s}, &writeView{s}
-	s.hashes = newHashStorage(lg, s)
+	s.hashes = NewHashStorage(lg, s)
 	return s
 }
 
@@ -944,17 +965,21 @@ func (b *fakeBatchTx) UnsafeDeleteBucket(bucket backend.Bucket) {}
 func (b *fakeBatchTx) UnsafePut(bucket backend.Bucket, key []byte, value []byte) {
 	b.Recorder.Record(testutil.Action{Name: "put", Params: []any{bucket, key, value}})
 }
+
 func (b *fakeBatchTx) UnsafeSeqPut(bucket backend.Bucket, key []byte, value []byte) {
 	b.Recorder.Record(testutil.Action{Name: "seqput", Params: []any{bucket, key, value}})
 }
+
 func (b *fakeBatchTx) UnsafeRange(bucket backend.Bucket, key, endKey []byte, limit int64) (keys [][]byte, vals [][]byte) {
 	b.Recorder.Record(testutil.Action{Name: "range", Params: []any{bucket, key, endKey, limit}})
 	r := <-b.rangeRespc
 	return r.keys, r.vals
 }
+
 func (b *fakeBatchTx) UnsafeDelete(bucket backend.Bucket, key []byte) {
 	b.Recorder.Record(testutil.Action{Name: "delete", Params: []any{bucket, key}})
 }
+
 func (b *fakeBatchTx) UnsafeForEach(bucket backend.Bucket, visitor func(k, v []byte) error) error {
 	return nil
 }
@@ -1020,27 +1045,33 @@ func (i *fakeIndex) Get(key []byte, atRev int64) (rev, created Revision, ver int
 	r := <-i.indexGetRespc
 	return r.rev, r.created, r.ver, r.err
 }
+
 func (i *fakeIndex) Range(key, end []byte, atRev int64) ([][]byte, []Revision) {
 	i.Recorder.Record(testutil.Action{Name: "range", Params: []any{key, end, atRev}})
 	r := <-i.indexRangeRespc
 	return r.keys, r.revs
 }
+
 func (i *fakeIndex) Put(key []byte, rev Revision) {
 	i.Recorder.Record(testutil.Action{Name: "put", Params: []any{key, rev}})
 }
+
 func (i *fakeIndex) Tombstone(key []byte, rev Revision) error {
 	i.Recorder.Record(testutil.Action{Name: "tombstone", Params: []any{key, rev}})
 	return nil
 }
+
 func (i *fakeIndex) RangeSince(key, end []byte, rev int64) []Revision {
 	i.Recorder.Record(testutil.Action{Name: "rangeEvents", Params: []any{key, end, rev}})
 	r := <-i.indexRangeEventsRespc
 	return r.revs
 }
+
 func (i *fakeIndex) Compact(rev int64) map[Revision]struct{} {
 	i.Recorder.Record(testutil.Action{Name: "compact", Params: []any{rev}})
 	return <-i.indexCompactRespc
 }
+
 func (i *fakeIndex) Keep(rev int64) map[Revision]struct{} {
 	i.Recorder.Record(testutil.Action{Name: "keep", Params: []any{rev}})
 	return <-i.indexCompactRespc

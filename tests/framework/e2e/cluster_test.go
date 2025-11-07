@@ -15,28 +15,37 @@
 package e2e
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/coreos/go-semver/semver"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestEtcdServerProcessConfig(t *testing.T) {
+	v3_6_0 := semver.Version{Major: 3, Minor: 6, Patch: 0}
+	v3_7_0 := semver.Version{Major: 3, Minor: 7, Patch: 0}
 	tcs := []struct {
 		name                 string
 		config               *EtcdProcessClusterConfig
+		expectArgsEquals     []string
 		expectArgsNotContain []string
 		expectArgsContain    []string
+		mockBinaryVersion    *semver.Version
 	}{
 		{
 			name:   "Default",
-			config: NewConfig(),
-			expectArgsContain: []string{
+			config: NewConfig(WithDataDirPath("/tmp/a")),
+			expectArgsEquals: []string{
+				"--name=TestEtcdServerProcessConfigDefault-test-0",
 				"--listen-client-urls=http://localhost:0",
 				"--advertise-client-urls=http://localhost:0",
 				"--listen-peer-urls=http://localhost:1",
 				"--initial-advertise-peer-urls=http://localhost:1",
 				"--initial-cluster-token=new",
+				"--data-dir=/tmp/a/member-0",
 				"--snapshot-count=10000",
+				"--initial-cluster-token=new",
 			},
 		},
 		{
@@ -57,7 +66,7 @@ func TestEtcdServerProcessConfig(t *testing.T) {
 			name:   "CorruptCheck",
 			config: NewConfig(WithInitialCorruptCheck(true)),
 			expectArgsContain: []string{
-				"--experimental-initial-corrupt-check=true",
+				"--feature-gates=InitialCorruptCheck=true",
 			},
 		},
 		{
@@ -71,20 +80,144 @@ func TestEtcdServerProcessConfig(t *testing.T) {
 			name:   "CatchUpEntries",
 			config: NewConfig(WithSnapshotCatchUpEntries(100)),
 			expectArgsContain: []string{
-				"--experimental-snapshot-catchup-entries=100",
+				"--snapshot-catchup-entries=100",
+			},
+			mockBinaryVersion: &v3_7_0,
+		},
+		{
+			name:   "CatchUpEntriesNoVersion",
+			config: NewConfig(WithSnapshotCatchUpEntries(100), WithVersion(LastVersion)),
+			expectArgsNotContain: []string{
+				"--snapshot-catchup-entries=100",
 			},
 		},
 		{
-			name:   "CatchUpEntriesLastVersion",
+			name:   "CatchUpEntriesOldVersion",
 			config: NewConfig(WithSnapshotCatchUpEntries(100), WithVersion(LastVersion)),
+			expectArgsContain: []string{
+				"--snapshot-catchup-entries=100",
+			},
+			mockBinaryVersion: &v3_6_0,
+		},
+		{
+			name:   "ClientHTTPSeparate",
+			config: NewConfig(WithClientHTTPSeparate(true)),
+			expectArgsContain: []string{
+				"--listen-client-http-urls=http://localhost:4",
+			},
+		},
+		{
+			name:   "ForceNewCluster",
+			config: NewConfig(WithForceNewCluster(true)),
+			expectArgsContain: []string{
+				"--force-new-cluster=true",
+			},
+		},
+		{
+			name:   "MetricsURL",
+			config: NewConfig(WithMetricsURLScheme("http")),
+			expectArgsContain: []string{
+				"--listen-metrics-urls=http://localhost:2",
+			},
+		},
+		{
+			name:   "ClientTLS",
+			config: NewConfig(WithClientConnType(ClientTLS)),
+			expectArgsContain: []string{
+				"--cert-file",
+				"--key-file",
+				"--trusted-ca-file",
+			},
 			expectArgsNotContain: []string{
-				"--experimental-snapshot-catchup-entries=100",
+				"--auto-tls",
+				"--client-cert-auth",
+			},
+		},
+		{
+			name:   "ClientTLSCA",
+			config: NewConfig(WithClientConnType(ClientTLS), WithClientCertAuthority(true)),
+			expectArgsContain: []string{
+				"--cert-file",
+				"--key-file",
+				"--trusted-ca-file",
+				"--client-cert-auth",
+			},
+			expectArgsNotContain: []string{
+				"--auto-tls",
+			},
+		},
+		{
+			name:   "ClientAutoTLS",
+			config: NewConfig(WithClientConnType(ClientTLS), WithClientAutoTLS(true)),
+			expectArgsContain: []string{
+				"--auto-tls",
+			},
+			expectArgsNotContain: []string{
+				"--cert-file",
+				"--key-file",
+				"--trusted-ca-file",
+				"--client-cert-auth",
+			},
+		},
+		{
+			name:   "PeerTLS",
+			config: NewConfig(WithIsPeerTLS(true)),
+			expectArgsContain: []string{
+				"--peer-cert-file",
+				"--peer-key-file",
+				"--peer-trusted-ca-file",
+			},
+			expectArgsNotContain: []string{
+				"--peer-auto-tls",
+				"--peer-client-cert-auth",
+			},
+		},
+		{
+			name:   "PeerAutoTLS",
+			config: NewConfig(WithIsPeerTLS(true), WithIsPeerAutoTLS(true)),
+			expectArgsContain: []string{
+				"--peer-auto-tls",
+			},
+			expectArgsNotContain: []string{
+				"--peer-cert-file",
+				"--peer-key-file",
+				"--peer-trusted-ca-file",
+				"--peer-client-cert-auth",
+			},
+		},
+		{
+			name:   "RevokeCerts",
+			config: NewConfig(WithClientRevokeCerts(true)),
+			expectArgsContain: []string{
+				"--client-crl-file",
+				"--client-cert-auth",
+			},
+		},
+		{
+			name:   "CipherSuites",
+			config: NewConfig(WithCipherSuites([]string{"a", "b"})),
+			expectArgsContain: []string{
+				"--cipher-suites",
 			},
 		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
+			var mockGetVersionFromBinary func(binaryPath string) (*semver.Version, error)
+			if tc.mockBinaryVersion == nil {
+				mockGetVersionFromBinary = func(binaryPath string) (*semver.Version, error) {
+					return nil, fmt.Errorf("could not get binary version")
+				}
+			} else {
+				mockGetVersionFromBinary = func(binaryPath string) (*semver.Version, error) {
+					return tc.mockBinaryVersion, nil
+				}
+			}
+			setGetVersionFromBinary(t, mockGetVersionFromBinary)
 			args := tc.config.EtcdServerProcessConfig(t, 0).Args
+			if len(tc.expectArgsEquals) != 0 {
+				assert.Equal(t, args, tc.expectArgsEquals)
+			}
 			if len(tc.expectArgsContain) != 0 {
 				assert.Subset(t, args, tc.expectArgsContain)
 			}

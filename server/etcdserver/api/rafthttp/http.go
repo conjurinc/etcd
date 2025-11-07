@@ -93,7 +93,7 @@ func newPipelineHandler(t *Transport, r Raft, cid types.ID) http.Handler {
 }
 
 func (h *pipelineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
@@ -138,9 +138,10 @@ func (h *pipelineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	receivedBytes.WithLabelValues(types.ID(m.From).String()).Add(float64(len(b)))
 
 	if err := h.r.Process(context.TODO(), m); err != nil {
-		switch v := err.(type) {
-		case writerToResponse:
-			v.WriteTo(w)
+		var writerErr writerToResponse
+		switch {
+		case errors.As(err, &writerErr):
+			writerErr.WriteTo(w)
 		default:
 			h.lg.Warn(
 				"failed to process Raft message",
@@ -199,7 +200,7 @@ const unknownSnapshotSender = "UNKNOWN_SNAPSHOT_SENDER"
 func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		snapshotReceiveFailures.WithLabelValues(unknownSnapshotSender).Inc()
@@ -294,11 +295,12 @@ func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err := h.r.Process(context.TODO(), m); err != nil {
-		switch v := err.(type) {
+		var writerErr writerToResponse
+		switch {
 		// Process may return writerToResponse error when doing some
 		// additional checks before calling raft.Node.Step.
-		case writerToResponse:
-			v.WriteTo(w)
+		case errors.As(err, &writerErr):
+			writerErr.WriteTo(w)
 		default:
 			msg := fmt.Sprintf("failed to process raft message (%v)", err)
 			h.lg.Warn(
@@ -346,7 +348,7 @@ func newStreamHandler(t *Transport, pg peerGetter, r Raft, id, cid types.ID) htt
 }
 
 func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
@@ -484,7 +486,7 @@ func checkClusterCompatibilityFromHeader(lg *zap.Logger, localID types.ID, heade
 
 	if err != nil {
 		lg.Warn(
-			"failed to check version compatibility",
+			"failed version compatibility check",
 			zap.String("local-member-id", localID.String()),
 			zap.String("local-member-cluster-id", cid.String()),
 			zap.String("local-member-server-version", localVs),

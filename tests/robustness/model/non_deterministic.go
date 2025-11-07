@@ -15,60 +15,97 @@
 package model
 
 import (
-	"encoding/json"
+	"cmp"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 
 	"github.com/anishathalye/porcupine"
 )
 
-// NonDeterministicModel extends DeterministicModel to allow for clients with imperfect knowledge of request destiny.
-// Unknown/error response doesn't inform whether request was persisted or not, so model
-// considers both cases. This is represented as multiple equally possible deterministic states.
+// NonDeterministicModel extends DeterministicModel to allow for clients with imperfect knowledge of the request's destiny.
+// An unknown/error response doesn't inform whether the request was persisted or not, so the model
+// considers both cases. This is represented as multiple, equally possible deterministic states.
 // Failed requests fork the possible states, while successful requests merge and filter them.
 var NonDeterministicModel = porcupine.Model{
 	Init: func() any {
-		data, err := json.Marshal(nonDeterministicState{freshEtcdState()})
-		if err != nil {
-			panic(err)
-		}
-		return string(data)
+		return nonDeterministicState{freshEtcdState()}
 	},
 	Step: func(st any, in any, out any) (bool, any) {
-		var states nonDeterministicState
-		err := json.Unmarshal([]byte(st.(string)), &states)
-		if err != nil {
-			panic(err)
-		}
-		ok, states := states.apply(in.(EtcdRequest), out.(MaybeEtcdResponse))
-		data, err := json.Marshal(states)
-		if err != nil {
-			panic(err)
-		}
-		return ok, string(data)
+		return st.(nonDeterministicState).apply(in.(EtcdRequest), out.(MaybeEtcdResponse))
+	},
+	Equal: func(st1, st2 any) bool {
+		return st1.(nonDeterministicState).Equal(st2.(nonDeterministicState))
 	},
 	DescribeOperation: func(in, out any) string {
 		return fmt.Sprintf("%s -> %s", describeEtcdRequest(in.(EtcdRequest)), describeEtcdResponse(in.(EtcdRequest), out.(MaybeEtcdResponse)))
+	},
+	DescribeState: func(st any) string {
+		etcdStates := st.(nonDeterministicState)
+		desc := make([]string, 0, len(etcdStates))
+
+		slices.SortFunc(etcdStates, func(i, j EtcdState) int {
+			if c := cmp.Compare(i.Revision, j.Revision); c != 0 {
+				return c
+			}
+			return cmp.Compare(i.CompactRevision, j.CompactRevision)
+		})
+
+		for i, s := range etcdStates {
+			// Describe just 3 first states before truncating
+			if i >= 3 {
+				desc = append(desc, "...truncated...")
+				break
+			}
+			desc = append(desc, describeEtcdState(s))
+		}
+
+		return strings.Join(desc, "\n")
 	},
 }
 
 type nonDeterministicState []EtcdState
 
+func (states nonDeterministicState) Equal(other nonDeterministicState) bool {
+	if len(states) != len(other) {
+		return false
+	}
+
+	otherMatched := make([]bool, len(other))
+	for _, sItem := range states {
+		foundMatchInOther := false
+		for j, otherItem := range other {
+			if !otherMatched[j] && sItem.Equal(otherItem) {
+				otherMatched[j] = true
+				foundMatchInOther = true
+				break
+			}
+		}
+		if !foundMatchInOther {
+			return false
+		}
+	}
+	return true
+}
+
 func (states nonDeterministicState) apply(request EtcdRequest, response MaybeEtcdResponse) (bool, nonDeterministicState) {
 	var newStates nonDeterministicState
 	switch {
 	case response.Error != "":
-		newStates = states.stepFailedResponse(request)
-	case response.PartialResponse:
-		newStates = states.applyResponseRevision(request, response.EtcdResponse.Revision)
+		newStates = states.applyFailedRequest(request)
+	case response.Persisted && response.PersistedRevision == 0:
+		newStates = states.applyPersistedRequest(request)
+	case response.Persisted && response.PersistedRevision != 0:
+		newStates = states.applyPersistedRequestWithRevision(request, response.PersistedRevision)
 	default:
-		newStates = states.applySuccessfulResponse(request, response.EtcdResponse)
+		newStates = states.applyRequestWithResponse(request, response.EtcdResponse)
 	}
 	return len(newStates) > 0, newStates
 }
 
-// stepFailedResponse duplicates number of states by considering both cases, request was persisted and request was lost.
-func (states nonDeterministicState) stepFailedResponse(request EtcdRequest) nonDeterministicState {
+// applyFailedRequest returns both the original states and states with applied request. It considers both cases, request was persisted and request was lost.
+func (states nonDeterministicState) applyFailedRequest(request EtcdRequest) nonDeterministicState {
 	newStates := make(nonDeterministicState, 0, len(states)*2)
 	for _, s := range states {
 		newStates = append(newStates, s)
@@ -80,8 +117,18 @@ func (states nonDeterministicState) stepFailedResponse(request EtcdRequest) nonD
 	return newStates
 }
 
-// applyResponseRevision filters possible states by leaving ony states that would return proper revision.
-func (states nonDeterministicState) applyResponseRevision(request EtcdRequest, responseRevision int64) nonDeterministicState {
+// applyPersistedRequest applies request to all possible states.
+func (states nonDeterministicState) applyPersistedRequest(request EtcdRequest) nonDeterministicState {
+	newStates := make(nonDeterministicState, 0, len(states))
+	for _, s := range states {
+		newState, _ := s.Step(request)
+		newStates = append(newStates, newState)
+	}
+	return newStates
+}
+
+// applyPersistedRequestWithRevision applies request to all possible states, but leaves only states that would return proper revision.
+func (states nonDeterministicState) applyPersistedRequestWithRevision(request EtcdRequest, responseRevision int64) nonDeterministicState {
 	newStates := make(nonDeterministicState, 0, len(states))
 	for _, s := range states {
 		newState, modelResponse := s.Step(request)
@@ -92,8 +139,8 @@ func (states nonDeterministicState) applyResponseRevision(request EtcdRequest, r
 	return newStates
 }
 
-// applySuccessfulResponse filters possible states by leaving ony states that would respond correctly.
-func (states nonDeterministicState) applySuccessfulResponse(request EtcdRequest, response EtcdResponse) nonDeterministicState {
+// applyRequestWithResponse applies request to all possible states, but leaves only state that would return proper response.
+func (states nonDeterministicState) applyRequestWithResponse(request EtcdRequest, response EtcdResponse) nonDeterministicState {
 	newStates := make(nonDeterministicState, 0, len(states))
 	for _, s := range states {
 		newState, modelResponse := s.Step(request)

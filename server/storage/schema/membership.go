@@ -37,6 +37,9 @@ type membershipBackend struct {
 	be backend.Backend
 }
 
+// NewMembershipBackend returns a new membership backend
+// Refer to https://github.com/etcd-io/etcd/pull/19343#discussion_r1958056718
+// revive:disable-next-line:unexported-return
 func NewMembershipBackend(lg *zap.Logger, be backend.Backend) *membershipBackend {
 	return &membershipBackend{
 		lg: lg,
@@ -93,25 +96,25 @@ func (s *membershipBackend) readMembersFromBackend() (map[types.ID]*membership.M
 	tx.RLock()
 	defer tx.RUnlock()
 	err := tx.UnsafeForEach(Members, func(k, v []byte) error {
-		memberId := mustParseMemberIDFromBytes(s.lg, k)
-		m := &membership.Member{ID: memberId}
+		memberID := mustParseMemberIDFromBytes(s.lg, k)
+		m := &membership.Member{ID: memberID}
 		if err := json.Unmarshal(v, &m); err != nil {
 			return err
 		}
-		members[memberId] = m
+		members[memberID] = m
 		return nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't read members from backend: %v", err)
+		return nil, nil, fmt.Errorf("couldn't read members from backend: %w", err)
 	}
 
 	err = tx.UnsafeForEach(MembersRemoved, func(k, v []byte) error {
-		memberId := mustParseMemberIDFromBytes(s.lg, k)
-		removed[memberId] = true
+		memberID := mustParseMemberIDFromBytes(s.lg, k)
+		removed[memberID] = true
 		return nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't read members_removed from backend: %v", err)
+		return nil, nil, fmt.Errorf("couldn't read members_removed from backend: %w", err)
 	}
 	return members, removed, nil
 }

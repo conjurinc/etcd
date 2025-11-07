@@ -15,10 +15,7 @@
 package validate
 
 import (
-	"fmt"
-	"reflect"
-	"sort"
-	"testing"
+	"errors"
 	"time"
 
 	"github.com/anishathalye/porcupine"
@@ -28,69 +25,80 @@ import (
 	"go.etcd.io/etcd/tests/v3/robustness/model"
 )
 
-func validateLinearizableOperationsAndVisualize(lg *zap.Logger, operations []porcupine.Operation) (result porcupine.CheckResult, visualize func(basepath string) error) {
-	const timeout = 5 * time.Minute
+var (
+	errRespNotMatched         = errors.New("response didn't match expected")
+	errFutureRevRespRequested = errors.New("request about a future rev with response")
+)
+
+func validateLinearizableOperationsAndVisualize(lg *zap.Logger, operations []porcupine.Operation, timeout time.Duration) LinearizationResult {
 	lg.Info("Validating linearizable operations", zap.Duration("timeout", timeout))
-	result, info := porcupine.CheckOperationsVerbose(model.NonDeterministicModel, operations, timeout)
-	switch result {
-	case porcupine.Illegal:
-		lg.Error("Linearization failed")
-	case porcupine.Unknown:
-		lg.Error("Linearization has timed out")
+	start := time.Now()
+	check, info := porcupine.CheckOperationsVerbose(model.NonDeterministicModel, operations, timeout)
+	result := LinearizationResult{
+		Info:  info,
+		Model: model.NonDeterministicModel,
+	}
+	switch check {
 	case porcupine.Ok:
-		lg.Info("Linearization success")
+		result.Status = Success
+		lg.Info("Linearization success", zap.Duration("duration", time.Since(start)))
+	case porcupine.Unknown:
+		result.Status = Failure
+		result.Message = "timed out"
+		result.Timeout = true
+		lg.Error("Linearization timed out", zap.Duration("duration", time.Since(start)))
+	case porcupine.Illegal:
+		result.Status = Failure
+		result.Message = "illegal"
+		lg.Error("Linearization illegal", zap.Duration("duration", time.Since(start)))
 	default:
-		panic(fmt.Sprintf("Unknown Linearization result %s", result))
+		result.Status = Failure
+		result.Message = "unknown"
 	}
-	return result, func(path string) error {
-		lg.Info("Saving visualization", zap.String("path", path))
-		err := porcupine.VisualizePath(model.NonDeterministicModel, info, path)
-		if err != nil {
-			return fmt.Errorf("failed to visualize, err: %v", err)
-		}
-		return nil
-	}
+	return result
 }
 
-func validateSerializableOperations(t *testing.T, lg *zap.Logger, operations []porcupine.Operation, totalEventHistory []model.WatchEvent) {
+func validateSerializableOperations(lg *zap.Logger, operations []porcupine.Operation, replay *model.EtcdReplay) Result {
 	lg.Info("Validating serializable operations")
-	staleReads := filterSerializableReads(operations)
-	if len(staleReads) == 0 {
-		return
+	start := time.Now()
+	err := validateSerializableOperationsError(lg, operations, replay)
+	if err != nil {
+		lg.Error("Serializable validation failed", zap.Duration("duration", time.Since(start)), zap.Error(err))
 	}
-	sort.Slice(staleReads, func(i, j int) bool {
-		return staleReads[i].Input.(model.EtcdRequest).Range.Revision < staleReads[j].Input.(model.EtcdRequest).Range.Revision
-	})
-	replay := model.NewReplay(totalEventHistory)
-	for _, read := range staleReads {
+	lg.Info("Serializable validation success", zap.Duration("duration", time.Since(start)))
+	return ResultFromError(err)
+}
+
+func validateSerializableOperationsError(lg *zap.Logger, operations []porcupine.Operation, replay *model.EtcdReplay) (lastErr error) {
+	for _, read := range operations {
 		request := read.Input.(model.EtcdRequest)
 		response := read.Output.(model.MaybeEtcdResponse)
-		validateSerializableOperation(t, replay, request, response)
-	}
-}
-
-func filterSerializableReads(operations []porcupine.Operation) []porcupine.Operation {
-	resp := []porcupine.Operation{}
-	for _, op := range operations {
-		request := op.Input.(model.EtcdRequest)
-		if request.Type == model.Range && request.Range.Revision != 0 {
-			resp = append(resp, op)
+		err := validateSerializableRead(lg, replay, request, response)
+		if err != nil {
+			lastErr = err
 		}
 	}
-	return resp
+	return lastErr
 }
 
-func validateSerializableOperation(t *testing.T, replay *model.EtcdReplay, request model.EtcdRequest, response model.MaybeEtcdResponse) {
-	if response.PartialResponse || response.Error != "" {
-		return
+func validateSerializableRead(lg *zap.Logger, replay *model.EtcdReplay, request model.EtcdRequest, response model.MaybeEtcdResponse) error {
+	if response.Persisted || response.Error != "" {
+		return nil
 	}
 	state, err := replay.StateForRevision(request.Range.Revision)
 	if err != nil {
-		t.Fatal(err)
+		if response.Error == model.ErrEtcdFutureRev.Error() {
+			return nil
+		}
+		lg.Error("Failed validating serializable operation", zap.Any("request", request), zap.Any("response", response))
+		return errFutureRevRespRequested
 	}
 
 	_, expectResp := state.Step(request)
-	if !reflect.DeepEqual(response.EtcdResponse.Range, expectResp.Range) {
-		t.Errorf("Invalid serializable response, diff: %s", cmp.Diff(response.EtcdResponse.Range, expectResp.Range))
+
+	if diff := cmp.Diff(response.EtcdResponse.Range, expectResp.Range); diff != "" {
+		lg.Error("Failed validating serializable operation", zap.Any("request", request), zap.String("diff", diff))
+		return errRespNotMatched
 	}
+	return nil
 }

@@ -26,7 +26,7 @@ import (
 
 func BenchmarkKVWatcherMemoryUsage(b *testing.B) {
 	be, _ := betesting.NewDefaultTmpBackend(b)
-	watchable := newWatchableStore(zaptest.NewLogger(b), be, &lease.FakeLessor{}, StoreConfig{})
+	watchable := New(zaptest.NewLogger(b), be, &lease.FakeLessor{}, StoreConfig{})
 
 	defer cleanup(watchable, be)
 
@@ -36,6 +36,6 @@ func BenchmarkKVWatcherMemoryUsage(b *testing.B) {
 	b.ReportAllocs()
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		w.Watch(0, []byte(fmt.Sprint("foo", i)), nil, 0)
+		w.Watch(b.Context(), 0, []byte(fmt.Sprint("foo", i)), nil, 0)
 	}
 }

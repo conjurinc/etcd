@@ -16,6 +16,9 @@ package model
 
 import (
 	"fmt"
+	"maps"
+	"slices"
+	"sort"
 	"strings"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -25,19 +28,24 @@ func describeEtcdResponse(request EtcdRequest, response MaybeEtcdResponse) strin
 	if response.Error != "" {
 		return fmt.Sprintf("err: %q", response.Error)
 	}
-	if response.PartialResponse {
-		return fmt.Sprintf("unknown, rev: %d", response.Revision)
+	if response.ClientError != "" {
+		return fmt.Sprintf("err: %q", response.ClientError)
+	}
+	if response.Persisted {
+		if response.PersistedRevision != 0 {
+			return fmt.Sprintf("unknown, rev: %d", response.PersistedRevision)
+		}
+		return "unknown"
 	}
 	switch request.Type {
 	case Range:
 		return fmt.Sprintf("%s, rev: %d", describeRangeResponse(request.Range.RangeOptions, *response.Range), response.Revision)
 	case Txn:
 		return fmt.Sprintf("%s, rev: %d", describeTxnResponse(request.Txn, response.Txn), response.Revision)
-	case LeaseGrant, LeaseRevoke, Defragment:
-		if response.Revision == 0 {
-			return "ok"
-		}
+	case LeaseGrant, LeaseRevoke:
 		return fmt.Sprintf("ok, rev: %d", response.Revision)
+	case Compact, Defragment:
+		return "ok"
 	default:
 		return fmt.Sprintf("<! unknown request type: %q !>", request.Type)
 	}
@@ -48,6 +56,10 @@ func describeEtcdRequest(request EtcdRequest) string {
 	case Range:
 		return describeRangeRequest(request.Range.RangeOptions, request.Range.Revision)
 	case Txn:
+		guaranteedTxnDescription := describeGuaranteedTxn(request.Txn)
+		if guaranteedTxnDescription != "" {
+			return guaranteedTxnDescription
+		}
 		onSuccess := describeEtcdOperations(request.Txn.OperationsOnSuccess)
 		if len(request.Txn.Conditions) != 0 {
 			if len(request.Txn.OperationsOnFailure) == 0 {
@@ -62,16 +74,91 @@ func describeEtcdRequest(request EtcdRequest) string {
 	case LeaseRevoke:
 		return fmt.Sprintf("leaseRevoke(%d)", request.LeaseRevoke.LeaseID)
 	case Defragment:
-		return fmt.Sprintf("defragment()")
+		return "defragment()"
+	case Compact:
+		return fmt.Sprintf("compact(%d)", request.Compact.Revision)
 	default:
 		return fmt.Sprintf("<! unknown request type: %q !>", request.Type)
 	}
 }
 
+func describeEtcdState(state EtcdState) string {
+	descHTML := make([]string, 0)
+
+	descHTML = append(descHTML, fmt.Sprintf("<p style=\"margin: 0.25em 0;\">state, rev: %d, compactRev: %d</p>", state.Revision, state.CompactRevision))
+
+	if len(state.KeyValues) > 0 {
+		descHTML = append(descHTML, "keys: <ul style=\"margin: 0.25em 0;\">")
+
+		keys := slices.Collect(maps.Keys(state.KeyValues))
+		sort.Strings(keys)
+		for _, key := range keys {
+			descHTML = append(descHTML, fmt.Sprintf("<li style=\"margin: 0.25em 0;\"><strong>%s</strong> - ", key))
+
+			value := state.KeyValues[key]
+			if value.Value.Value != "" {
+				descHTML = append(descHTML, fmt.Sprintf("val: %q, ", value.Value.Value))
+			}
+			if value.Value.Hash != 0 {
+				descHTML = append(descHTML, fmt.Sprintf("hash: %d, ", value.Value.Hash))
+			}
+			lease := state.KeyLeases[key]
+			if lease != 0 {
+				descHTML = append(descHTML, fmt.Sprintf("lease: %d, ", lease))
+			}
+
+			descHTML = append(descHTML, fmt.Sprintf("mod: %d, ver: %d</li>", value.ModRevision, value.Version))
+		}
+
+		descHTML = append(descHTML, "</ul>")
+	}
+
+	if len(state.Leases) > 0 {
+		descHTML = append(descHTML, "leases: <ul style=\"margin: 0.25em 0;\">")
+		leases := slices.Collect(maps.Keys(state.Leases))
+		slices.Sort(leases)
+		for _, lease := range leases {
+			descHTML = append(descHTML, fmt.Sprintf("<li style=\"margin: 0.25em 0;\"><strong>%d</strong></li>", lease))
+		}
+		descHTML = append(descHTML, "</ul>")
+	}
+
+	return strings.Join(descHTML, "")
+}
+
+func describeGuaranteedTxn(txn *TxnRequest) string {
+	if len(txn.Conditions) != 1 || len(txn.OperationsOnSuccess) != 1 || len(txn.OperationsOnFailure) > 1 {
+		return ""
+	}
+	switch txn.OperationsOnSuccess[0].Type {
+	case PutOperation:
+		if txn.Conditions[0].Key != txn.OperationsOnSuccess[0].Put.Key || (len(txn.OperationsOnFailure) == 1 && txn.Conditions[0].Key != txn.OperationsOnFailure[0].Range.Start) {
+			return ""
+		}
+		if txn.Conditions[0].ExpectedVersion > 0 {
+			return ""
+		}
+		if txn.Conditions[0].ExpectedRevision == 0 {
+			return fmt.Sprintf("guaranteedCreate(%q, %s)", txn.Conditions[0].Key, describeValueOrHash(txn.OperationsOnSuccess[0].Put.Value))
+		}
+		return fmt.Sprintf("guaranteedUpdate(%q, %s, mod_rev=%d)", txn.Conditions[0].Key, describeValueOrHash(txn.OperationsOnSuccess[0].Put.Value), txn.Conditions[0].ExpectedRevision)
+	case DeleteOperation:
+		if txn.Conditions[0].Key != txn.OperationsOnSuccess[0].Delete.Key || (len(txn.OperationsOnFailure) == 1 && txn.Conditions[0].Key != txn.OperationsOnFailure[0].Range.Start) {
+			return ""
+		}
+		return fmt.Sprintf("guaranteedDelete(%q, mod_rev=%d)", txn.Conditions[0].Key, txn.Conditions[0].ExpectedRevision)
+	}
+	return ""
+}
+
 func describeEtcdConditions(conds []EtcdCondition) string {
 	opsDescription := make([]string, len(conds))
-	for i := range conds {
-		opsDescription[i] = fmt.Sprintf("mod_rev(%s)==%d", conds[i].Key, conds[i].ExpectedRevision)
+	for i, cond := range conds {
+		if cond.ExpectedVersion > 0 {
+			opsDescription[i] = fmt.Sprintf("ver(%s)==%d", cond.Key, cond.ExpectedVersion)
+		} else {
+			opsDescription[i] = fmt.Sprintf("mod_rev(%s)==%d", cond.Key, cond.ExpectedRevision)
+		}
 	}
 	return strings.Join(opsDescription, " && ")
 }
@@ -136,6 +223,8 @@ func describeRangeRequest(opts RangeOptions, revision int64) string {
 		return fmt.Sprintf("get(%q%s)", opts.Start, kwargsString)
 	case opts.End == clientv3.GetPrefixRangeEnd(opts.Start):
 		return fmt.Sprintf("list(%q%s)", opts.Start, kwargsString)
+	case strings.HasSuffix(opts.Start, "\x00") && strings.HasSuffix(opts.End, "0") && strings.HasPrefix(opts.Start, opts.End[:len(opts.End)-1]):
+		return fmt.Sprintf("list[continued](%q%s)", strings.TrimRight(opts.Start, "\x00"), kwargsString)
 	default:
 		return fmt.Sprintf("range(%q..%q%s)", opts.Start, opts.End, kwargsString)
 	}
@@ -146,7 +235,7 @@ func describeEtcdOperationResponse(op EtcdOperation, resp EtcdOperationResult) s
 	case RangeOperation:
 		return describeRangeResponse(op.Range, resp.RangeResponse)
 	case PutOperation:
-		return fmt.Sprintf("ok")
+		return "ok"
 	case DeleteOperation:
 		return fmt.Sprintf("deleted: %d", resp.Deleted)
 	default:

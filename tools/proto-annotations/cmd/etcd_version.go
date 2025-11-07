@@ -17,6 +17,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,19 +28,17 @@ import (
 	"go.etcd.io/etcd/server/v3/storage/wal"
 )
 
-var (
-	// externalPackages that are not expected to have etcd version annotation.
-	externalPackages = []string{
-		"io.prometheus.client",
-		"grpc.binarylog.v1",
-		"google.protobuf",
-		"google.rpc",
-		"google.api",
-		"raftpb",
-		"grpc.gateway.protoc_gen_swagger.options",
-		"grpc.gateway.protoc_gen_openapiv2.options",
-	}
-)
+// externalPackages that are not expected to have etcd version annotation.
+var externalPackages = []string{
+	"io.prometheus.client",
+	"grpc.binarylog.v1",
+	"google.protobuf",
+	"google.rpc",
+	"google.api",
+	"raftpb",
+	"grpc.gateway.protoc_gen_swagger.options",
+	"grpc.gateway.protoc_gen_openapiv2.options",
+}
 
 // printEtcdVersion writes etcd_version proto annotation to stdout and returns any errors encountered when reading annotation.
 func printEtcdVersion() []error {
@@ -74,10 +73,8 @@ func allEtcdVersionAnnotations() (annotations []etcdVersionAnnotation, err error
 	var fileAnnotations []etcdVersionAnnotation
 	protoregistry.GlobalFiles.RangeFiles(func(file protoreflect.FileDescriptor) bool {
 		pkg := string(file.Package())
-		for _, externalPkg := range externalPackages {
-			if pkg == externalPkg {
-				return true
-			}
+		if slices.Contains(externalPackages, pkg) {
+			return true
 		}
 		fileAnnotations, err = fileEtcdVersionAnnotations(file)
 		if err != nil {

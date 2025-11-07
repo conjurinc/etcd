@@ -15,7 +15,6 @@
 package mvcc
 
 import (
-	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -29,7 +28,7 @@ import (
 )
 
 func TestScheduleCompaction(t *testing.T) {
-	revs := []Revision{Revision{Main: 1}, Revision{Main: 2}, Revision{Main: 3}}
+	revs := []Revision{{Main: 1}, {Main: 2}, {Main: 3}}
 
 	tests := []struct {
 		rev   int64
@@ -76,8 +75,8 @@ func TestScheduleCompaction(t *testing.T) {
 		tx := s.b.BatchTx()
 
 		tx.Lock()
-		ibytes := NewRevBytes()
 		for _, rev := range revs {
+			ibytes := NewRevBytes()
 			ibytes = RevToBytes(rev, ibytes)
 			tx.UnsafePut(schema.Key, ibytes, []byte("bar"))
 		}
@@ -90,6 +89,7 @@ func TestScheduleCompaction(t *testing.T) {
 
 		tx.Lock()
 		for _, rev := range tt.wrevs {
+			ibytes := NewRevBytes()
 			ibytes = RevToBytes(rev, ibytes)
 			keys, _ := tx.UnsafeRange(schema.Key, ibytes, nil, 0)
 			if len(keys) != 1 {
@@ -138,7 +138,7 @@ func TestCompactAllAndRestore(t *testing.T) {
 	if s1.Rev() != rev {
 		t.Errorf("rev = %v, want %v", s1.Rev(), rev)
 	}
-	_, err = s1.Range(context.TODO(), []byte("foo"), nil, RangeOptions{})
+	_, err = s1.Range(t.Context(), []byte("foo"), nil, RangeOptions{})
 	if err != nil {
 		t.Errorf("unexpect range error %v", err)
 	}

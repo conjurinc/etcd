@@ -16,6 +16,7 @@ package mvcc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
@@ -203,7 +205,7 @@ func testKVRangeBadRev(t *testing.T, f rangeFunc) {
 	}
 	for i, tt := range tests {
 		_, err := f(s, []byte("foo"), []byte("foo3"), RangeOptions{Rev: tt.rev})
-		if err != tt.werr {
+		if !errors.Is(err, tt.werr) {
 			t.Errorf("#%d: error = %v, want %v", i, err, tt.werr)
 		}
 	}
@@ -271,7 +273,7 @@ func testKVPutMultipleTimes(t *testing.T, f putFunc) {
 			t.Errorf("#%d: rev = %d, want %d", i, rev, base+1)
 		}
 
-		r, err := s.Range(context.TODO(), []byte("foo"), nil, RangeOptions{})
+		r, err := s.Range(t.Context(), []byte("foo"), nil, RangeOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -382,7 +384,7 @@ func testKVPutWithSameLease(t *testing.T, f putFunc) {
 	}
 
 	// check leaseID
-	r, err := s.Range(context.TODO(), []byte("foo"), nil, RangeOptions{})
+	r, err := s.Range(t.Context(), []byte("foo"), nil, RangeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +412,7 @@ func TestKVOperationInSequence(t *testing.T) {
 			t.Errorf("#%d: put rev = %d, want %d", i, rev, base+1)
 		}
 
-		r, err := s.Range(context.TODO(), []byte("foo"), nil, RangeOptions{Rev: base + 1})
+		r, err := s.Range(t.Context(), []byte("foo"), nil, RangeOptions{Rev: base + 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -430,7 +432,7 @@ func TestKVOperationInSequence(t *testing.T) {
 			t.Errorf("#%d: n = %d, rev = %d, want (%d, %d)", i, n, rev, 1, base+2)
 		}
 
-		r, err = s.Range(context.TODO(), []byte("foo"), nil, RangeOptions{Rev: base + 2})
+		r, err = s.Range(t.Context(), []byte("foo"), nil, RangeOptions{Rev: base + 2})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -488,7 +490,7 @@ func TestKVTxnNonBlockRange(t *testing.T) {
 	donec := make(chan struct{})
 	go func() {
 		defer close(donec)
-		s.Range(context.TODO(), []byte("foo"), nil, RangeOptions{})
+		s.Range(t.Context(), []byte("foo"), nil, RangeOptions{})
 	}()
 	select {
 	case <-donec:
@@ -514,7 +516,7 @@ func TestKVTxnOperationInSequence(t *testing.T) {
 			t.Errorf("#%d: put rev = %d, want %d", i, rev, base+1)
 		}
 
-		r, err := txn.Range(context.TODO(), []byte("foo"), nil, RangeOptions{Rev: base + 1})
+		r, err := txn.Range(t.Context(), []byte("foo"), nil, RangeOptions{Rev: base + 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -534,7 +536,7 @@ func TestKVTxnOperationInSequence(t *testing.T) {
 			t.Errorf("#%d: n = %d, rev = %d, want (%d, %d)", i, n, rev, 1, base+1)
 		}
 
-		r, err = txn.Range(context.TODO(), []byte("foo"), nil, RangeOptions{Rev: base + 1})
+		r, err = txn.Range(t.Context(), []byte("foo"), nil, RangeOptions{Rev: base + 1})
 		if err != nil {
 			t.Errorf("#%d: range error (%v)", i, err)
 		}
@@ -593,7 +595,7 @@ func TestKVCompactReserveLastValue(t *testing.T) {
 		if err != nil {
 			t.Errorf("#%d: unexpect compact error %v", i, err)
 		}
-		r, err := s.Range(context.TODO(), []byte("foo"), nil, RangeOptions{Rev: tt.rev + 1})
+		r, err := s.Range(t.Context(), []byte("foo"), nil, RangeOptions{Rev: tt.rev + 1})
 		if err != nil {
 			t.Errorf("#%d: unexpect range error %v", i, err)
 		}
@@ -626,7 +628,7 @@ func TestKVCompactBad(t *testing.T) {
 	}
 	for i, tt := range tests {
 		_, err := s.Compact(traceutil.TODO(), tt.rev)
-		if err != tt.werr {
+		if !errors.Is(err, tt.werr) {
 			t.Errorf("#%d: compact error = %v, want %v", i, err, tt.werr)
 		}
 	}
@@ -656,6 +658,8 @@ func TestKVHash(t *testing.T) {
 }
 
 func TestKVRestore(t *testing.T) {
+	compactBatchLimit := 5
+
 	tests := []func(kv KV){
 		func(kv KV) {
 			kv.Put([]byte("foo"), []byte("bar0"), 1)
@@ -673,14 +677,27 @@ func TestKVRestore(t *testing.T) {
 			kv.Put([]byte("foo"), []byte("bar1"), 2)
 			kv.Compact(traceutil.TODO(), 1)
 		},
+		func(kv KV) { // after restore, foo1 key only has tombstone revision
+			kv.Put([]byte("foo1"), []byte("bar1"), 0)
+			kv.Put([]byte("foo2"), []byte("bar2"), 0)
+			kv.Put([]byte("foo3"), []byte("bar3"), 0)
+			kv.Put([]byte("foo4"), []byte("bar4"), 0)
+			kv.Put([]byte("foo5"), []byte("bar5"), 0)
+			_, delAtRev := kv.DeleteRange([]byte("foo1"), nil)
+			assert.Equal(t, int64(7), delAtRev)
+
+			// after compaction and restore, foo1 key only has tombstone revision
+			ch, _ := kv.Compact(traceutil.TODO(), delAtRev)
+			<-ch
+		},
 	}
 	for i, tt := range tests {
 		b, _ := betesting.NewDefaultTmpBackend(t)
-		s := NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{})
+		s := NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{CompactionBatchLimit: compactBatchLimit})
 		tt(s)
 		var kvss [][]mvccpb.KeyValue
 		for k := int64(0); k < 10; k++ {
-			r, _ := s.Range(context.TODO(), []byte("a"), []byte("z"), RangeOptions{Rev: k})
+			r, _ := s.Range(t.Context(), []byte("a"), []byte("z"), RangeOptions{Rev: k})
 			kvss = append(kvss, r.KVs)
 		}
 
@@ -688,7 +705,7 @@ func TestKVRestore(t *testing.T) {
 		s.Close()
 
 		// ns should recover the previous state from backend.
-		ns := NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{})
+		ns := NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{CompactionBatchLimit: compactBatchLimit})
 
 		if keysRestore := readGaugeInt(keysGauge); keysBefore != keysRestore {
 			t.Errorf("#%d: got %d key count, expected %d", i, keysRestore, keysBefore)
@@ -698,7 +715,7 @@ func TestKVRestore(t *testing.T) {
 		testutil.WaitSchedule()
 		var nkvss [][]mvccpb.KeyValue
 		for k := int64(0); k < 10; k++ {
-			r, _ := ns.Range(context.TODO(), []byte("a"), []byte("z"), RangeOptions{Rev: k})
+			r, _ := ns.Range(t.Context(), []byte("a"), []byte("z"), RangeOptions{Rev: k})
 			nkvss = append(nkvss, r.KVs)
 		}
 		cleanup(ns, b)
@@ -742,7 +759,7 @@ func TestKVSnapshot(t *testing.T) {
 
 	ns := NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{})
 	defer ns.Close()
-	r, err := ns.Range(context.TODO(), []byte("a"), []byte("z"), RangeOptions{})
+	r, err := ns.Range(t.Context(), []byte("a"), []byte("z"), RangeOptions{})
 	if err != nil {
 		t.Errorf("unexpect range error (%v)", err)
 	}
@@ -756,16 +773,17 @@ func TestKVSnapshot(t *testing.T) {
 
 func TestWatchableKVWatch(t *testing.T) {
 	b, _ := betesting.NewDefaultTmpBackend(t)
-	s := WatchableKV(newWatchableStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{}))
+	s := New(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{})
 	defer cleanup(s, b)
 
 	w := s.NewWatchStream()
 	defer w.Close()
 
-	wid, _ := w.Watch(0, []byte("foo"), []byte("fop"), 0)
+	wid, _ := w.Watch(t.Context(), 0, []byte("foo"), []byte("fop"), 0)
 
 	wev := []mvccpb.Event{
-		{Type: mvccpb.PUT,
+		{
+			Type: mvccpb.PUT,
 			Kv: &mvccpb.KeyValue{
 				Key:            []byte("foo"),
 				Value:          []byte("bar"),
@@ -829,7 +847,7 @@ func TestWatchableKVWatch(t *testing.T) {
 	}
 
 	w = s.NewWatchStream()
-	wid, _ = w.Watch(0, []byte("foo1"), []byte("foo2"), 3)
+	wid, _ = w.Watch(t.Context(), 0, []byte("foo1"), []byte("foo2"), 3)
 
 	select {
 	case resp := <-w.Chan():

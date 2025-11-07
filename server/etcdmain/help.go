@@ -1,5 +1,4 @@
 // Copyright 2015 The etcd Authors
-// Copyright 2015 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,12 +17,14 @@ package etcdmain
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
 	cconfig "go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
+	"go.etcd.io/etcd/server/v3/features"
 )
 
 var (
@@ -56,7 +57,7 @@ Member:
   --wal-dir ''
     Path to the dedicated wal directory.
   --snapshot-count '10000'
-    Number of committed transactions to trigger a snapshot to disk.
+    Number of committed transactions to trigger a snapshot to disk. Deprecated in v3.6 and will be decommissioned in v3.7.
   --heartbeat-interval '100'
     Time (in milliseconds) of a heartbeat interval.
   --election-timeout '1000'
@@ -70,11 +71,13 @@ Member:
   --listen-client-http-urls ''
     List of URLs to listen on for http only client traffic. Enabling this flag removes http services from --listen-client-urls.
   --max-snapshots '` + strconv.Itoa(embed.DefaultMaxSnapshots) + `'
-    Maximum number of snapshot files to retain (0 is unlimited).
+    Maximum number of snapshot files to retain (0 is unlimited). Deprecated in v3.6 and will be decommissioned in v3.7.
   --max-wals '` + strconv.Itoa(embed.DefaultMaxWALs) + `'
     Maximum number of wal files to retain (0 is unlimited).
+  --memory-mlock
+    Enable to enforce etcd pages (in particular bbolt) to stay in RAM.
   --quota-backend-bytes '0'
-    Raise alarms when backend size exceeds the given quota (0 defaults to low space quota).
+    Sets the maximum size (in bytes) that the etcd backend database may consume. Exceeding this triggers an alarm and puts etcd in read-only mode. Set to 0 to use the default 2GiB limit.
   --backend-bbolt-freelist-type 'map'
     BackendFreelistType specifies the type of freelist that boltdb backend uses(array and map are supported types).
   --backend-batch-interval ''
@@ -103,6 +106,8 @@ Member:
     Read timeout set on each rafthttp connection
   --raft-write-timeout '` + rafthttp.DefaultConnWriteTimeout.String() + `'
     Write timeout set on each rafthttp connection
+  --feature-gates ''
+    A set of key=value pairs that describe server level feature gates for alpha/experimental features. Options are:` + "\n    " + strings.Join(features.NewDefaultServerFeatureGate("", nil).KnownFeatures(), "\n    ") + `
 
 Clustering:
   --initial-advertise-peer-urls 'http://localhost:2380'
@@ -110,7 +115,7 @@ Clustering:
   --initial-cluster 'default=http://localhost:2380'
     Initial cluster configuration for bootstrapping.
   --initial-cluster-state 'new'
-    Initial cluster state ('new' when bootstrapping a new cluster or 'existing' when adding new members to an existing cluster). 
+    Initial cluster state ('new' when bootstrapping a new cluster or 'existing' when adding new members to an existing cluster).
     After successful initialization (bootstrapping or adding), flag is ignored on restarts
   --initial-cluster-token 'etcd-cluster'
     Initial cluster token for the etcd cluster during bootstrap.
@@ -157,18 +162,18 @@ Clustering:
   --strict-reconfig-check '` + strconv.FormatBool(embed.DefaultStrictReconfigCheck) + `'
     Reject reconfiguration requests that would cause quorum loss.
   --pre-vote 'true'
-    Enable to run an additional Raft election phase.
+    Enable the raft Pre-Vote algorithm to prevent disruption when a node that has been partitioned away rejoins the cluster.
   --auto-compaction-retention '0'
     Auto compaction retention length. 0 means disable auto compaction.
   --auto-compaction-mode 'periodic'
     Interpret 'auto-compaction-retention' one of: periodic|revision. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention.
-  --v2-deprecation '` + string(cconfig.V2_DEPR_DEFAULT) + `'
-    Phase of v2store deprecation. Allows to opt-in for higher compatibility mode.
+  --v2-deprecation '` + string(cconfig.V2DeprDefault) + `'
+    Phase of v2store deprecation. Deprecated and scheduled for removal in v3.8. The default value is enforced, ignoring user input.
     Supported values:
       'not-yet'                // Issues a warning if v2store have meaningful content (default in v3.5)
-      'write-only'             // Custom v2 state is not allowed (planned default in v3.6)
-      'write-only-drop-data'   // Custom v2 state will get DELETED !
-      'gone'                   // v2store is not maintained any longer. (planned default in v3.7)
+      'write-only'             // Custom v2 state is not allowed (default in v3.6)
+      'write-only-drop-data'   // Custom v2 state will get DELETED ! (planned default in v3.7)
+      'gone'                   // v2store is not maintained any longer. (planned to cleanup anything related to v2store in v3.8)
 
 Security:
   --cert-file ''
@@ -184,7 +189,7 @@ Security:
   --client-crl-file ''
     Path to the client certificate revocation list file.
   --client-cert-allowed-hostname ''
-    Allowed TLS hostname for client cert authentication.
+    Comma-separated list of SAN hostnames for client cert authentication.
   --trusted-ca-file ''
     Path to the client server TLS trusted CA cert file.
   --auto-tls 'false'
@@ -202,9 +207,9 @@ Security:
   --peer-trusted-ca-file ''
     Path to the peer server TLS trusted CA file.
   --peer-cert-allowed-cn ''
-    Required CN for client certs connecting to the peer endpoint.
+    Comma-separated list of allowed CNs for inter-peer TLS authentication.
   --peer-cert-allowed-hostname ''
-    Allowed TLS hostname for inter peer authentication.
+    Comma-separated list of allowed SAN hostnames for inter-peer TLS authentication.
   --peer-auto-tls 'false'
     Peer TLS using self-generated certificates if --peer-key-file and --peer-cert-file are not provided.
   --self-signed-cert-validity '1'
@@ -236,7 +241,7 @@ Profiling and Monitoring:
   --metrics 'basic'
     Set level of detail for exported metrics, specify 'extensive' to include server side grpc histogram metrics.
   --listen-metrics-urls ''
-    List of URLs to listen on for the metrics and health endpoints.
+    List of URLs to listen on for the /metrics and /health endpoints. For https, the client URL TLS info is used.
 
 Logging:
   --logger 'zap'
@@ -254,59 +259,41 @@ Logging:
   --warning-unary-request-duration '300ms'
     Set time duration after which a warning is logged if a unary request takes more than this duration.
 
-Experimental distributed tracing:
-  --experimental-enable-distributed-tracing 'false'
-    Enable experimental distributed tracing.
-  --experimental-distributed-tracing-address 'localhost:4317'
+Distributed tracing:
+  --enable-distributed-tracing 'false'
+    Enable distributed tracing.
+  --distributed-tracing-address 'localhost:4317'
     Distributed tracing collector address.
-  --experimental-distributed-tracing-service-name 'etcd'
+  --distributed-tracing-service-name 'etcd'
     Distributed tracing service name, must be same across all etcd instances.
-  --experimental-distributed-tracing-instance-id ''
+  --distributed-tracing-instance-id ''
     Distributed tracing instance ID, must be unique per each etcd instance.
-  --experimental-distributed-tracing-sampling-rate '0'
-    Number of samples to collect per million spans for distributed tracing. Disabled by default.
+  --distributed-tracing-sampling-rate '0'
+    Number of samples to collect per million spans for distributed tracing.
 
-Experimental feature:
-  --experimental-initial-corrupt-check 'false'
-    Enable to check data corruption before serving any client/peer traffic.
-  --experimental-corrupt-check-time '0s'
+Features:
+  --corrupt-check-time '0s'
     Duration of time between cluster corruption check passes.
-  --experimental-compact-hash-check-enabled 'false'
-    Enable leader to periodically check followers compaction hashes.
-  --experimental-compact-hash-check-time '1m'
+  --compact-hash-check-time '1m'
     Duration of time between leader checks followers compaction hashes.
-  --experimental-enable-lease-checkpoint 'false'
-    ExperimentalEnableLeaseCheckpoint enables primary lessor to persist lease remainingTTL to prevent indefinite auto-renewal of long lived leases.
-  --experimental-compaction-batch-limit 1000
-    ExperimentalCompactionBatchLimit sets the maximum revisions deleted in each compaction batch.
-  --experimental-peer-skip-client-san-verification 'false'
+  --compaction-batch-limit 1000
+    CompactionBatchLimit sets the maximum revisions deleted in each compaction batch.
+  --peer-skip-client-san-verification 'false'
     Skip verification of SAN field in client certificate for peer connections.
-  --experimental-watch-progress-notify-interval '10m'
+  --watch-progress-notify-interval '10m'
     Duration of periodical watch progress notification.
-  --experimental-warning-apply-duration '100ms'
+  --warning-apply-duration '100ms'
     Warning is generated if requests take more than this duration.
-  --experimental-txn-mode-write-with-shared-buffer 'true'
-    Enable the write transaction to use a shared buffer in its readonly check operations.
-  --experimental-bootstrap-defrag-threshold-megabytes
+  --bootstrap-defrag-threshold-megabytes
     Enable the defrag during etcd server bootstrap on condition that it will free at least the provided threshold of disk space. Needs to be set to non-zero value to take effect.
-  --experimental-warning-unary-request-duration '300ms'
-    Set time duration after which a warning is generated if a unary request takes more than this duration. It's deprecated, and will be decommissioned in v3.7. Use --warning-unary-request-duration instead.
-  --experimental-max-learners '1'
+  --max-learners '1'
     Set the max number of learner members allowed in the cluster membership.
-  --experimental-snapshot-catch-up-entries '5000'
-    Number of entries for a slow follower to catch up after compacting the raft storage entries.
-  --experimental-compaction-sleep-interval
+  --compaction-sleep-interval
     Sets the sleep interval between each compaction batch.
-  --experimental-downgrade-check-time
+  --downgrade-check-time
     Duration of time between two downgrade status checks.
-  --experimental-enable-lease-checkpoint-persist 'false'
-    Enable persisting remainingTTL to prevent indefinite auto-renewal of long lived leases. Always enabled in v3.6. Should be used to ensure smooth upgrade from v3.5 clusters with this feature enabled. Requires experimental-enable-lease-checkpoint to be enabled.
-  --experimental-memory-mlock
-    Enable to enforce etcd pages (in particular bbolt) to stay in RAM.
-  --experimental-snapshot-catchup-entries
+  --snapshot-catchup-entries
     Number of entries for a slow follower to catch up after compacting the raft storage entries.
-  --experimental-stop-grpc-service-on-defrag
-    Enable etcd gRPC service to stop serving client requests on defragmentation.
 
 Unsafe feature:
   --force-new-cluster 'false'

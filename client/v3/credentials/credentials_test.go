@@ -15,7 +15,6 @@
 package credentials
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,7 +24,7 @@ import (
 
 func TestUpdateAuthToken(t *testing.T) {
 	bundle := NewPerRPCCredentialBundle()
-	ctx := context.TODO()
+	ctx := t.Context()
 
 	metadataBeforeUpdate, _ := bundle.PerRPCCredentials().GetRequestMetadata(ctx)
 	assert.Empty(t, metadataBeforeUpdate)
@@ -33,5 +32,5 @@ func TestUpdateAuthToken(t *testing.T) {
 	bundle.UpdateAuthToken("abcdefg")
 
 	metadataAfterUpdate, _ := bundle.PerRPCCredentials().GetRequestMetadata(ctx)
-	assert.Equal(t, metadataAfterUpdate[rpctypes.TokenFieldNameGRPC], "abcdefg")
+	assert.Equal(t, "abcdefg", metadataAfterUpdate[rpctypes.TokenFieldNameGRPC])
 }

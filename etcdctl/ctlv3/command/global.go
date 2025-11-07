@@ -47,6 +47,8 @@ type GlobalFlags struct {
 	CommandTimeOut        time.Duration
 	KeepAliveTime         time.Duration
 	KeepAliveTimeout      time.Duration
+	MaxCallSendMsgSize    int
+	MaxCallRecvMsgSize    int
 	DNSClusterServiceName string
 
 	TLS transport.TLSInfo
@@ -56,6 +58,7 @@ type GlobalFlags struct {
 
 	User     string
 	Password string
+	Token    string
 
 	Debug bool
 }
@@ -128,6 +131,8 @@ func clientConfigFromCmd(cmd *cobra.Command) *clientv3.ConfigSpec {
 	cfg.DialTimeout = dialTimeoutFromCmd(cmd)
 	cfg.KeepAliveTime = keepAliveTimeFromCmd(cmd)
 	cfg.KeepAliveTimeout = keepAliveTimeoutFromCmd(cmd)
+	cfg.MaxCallSendMsgSize = maxCallSendMsgSizeFromCmd(cmd)
+	cfg.MaxCallRecvMsgSize = maxCallRecvMsgSizeFromCmd(cmd)
 
 	cfg.Secure = secureCfgFromCmd(cmd)
 	cfg.Auth = authCfgFromCmd(cmd)
@@ -201,6 +206,22 @@ func keepAliveTimeoutFromCmd(cmd *cobra.Command) time.Duration {
 	return keepAliveTimeout
 }
 
+func maxCallSendMsgSizeFromCmd(cmd *cobra.Command) int {
+	maxRequestBytes, err := cmd.Flags().GetInt("max-request-bytes")
+	if err != nil {
+		cobrautl.ExitWithError(cobrautl.ExitError, err)
+	}
+	return maxRequestBytes
+}
+
+func maxCallRecvMsgSizeFromCmd(cmd *cobra.Command) int {
+	maxReceiveBytes, err := cmd.Flags().GetInt("max-recv-bytes")
+	if err != nil {
+		cobrautl.ExitWithError(cobrautl.ExitError, err)
+	}
+	return maxReceiveBytes
+}
+
 func secureCfgFromCmd(cmd *cobra.Command) *clientv3.SecureConfig {
 	cert, key, cacert := keyAndCertFromCmd(cmd)
 	insecureTr := insecureTransportFromCmd(cmd)
@@ -270,12 +291,21 @@ func authCfgFromCmd(cmd *cobra.Command) *clientv3.AuthConfig {
 	if err != nil {
 		cobrautl.ExitWithError(cobrautl.ExitBadArgs, err)
 	}
+	tokenFlag, err := cmd.Flags().GetString("auth-jwt-token")
+	if err != nil {
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, err)
+	}
 
-	if userFlag == "" {
+	if userFlag == "" && tokenFlag == "" {
 		return nil
 	}
 
 	var cfg clientv3.AuthConfig
+
+	if tokenFlag != "" {
+		cfg.Token = tokenFlag
+		return &cfg
+	}
 
 	if passwordFlag == "" {
 		splitted := strings.SplitN(userFlag, ":", 2)

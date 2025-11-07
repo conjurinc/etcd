@@ -196,6 +196,7 @@ func (p *fieldsPrinter) EndpointStatus(eps []epStatus) {
 		fmt.Printf("\"StorageVersion\" : %q\n", ep.Resp.StorageVersion)
 		fmt.Println(`"DBSize" :`, ep.Resp.DbSize)
 		fmt.Println(`"DBSizeInUse" :`, ep.Resp.DbSizeInUse)
+		fmt.Println(`"DBSizeQuota" :`, ep.Resp.DbSizeQuota)
 		fmt.Println(`"Leader" :`, ep.Resp.Leader)
 		fmt.Println(`"IsLearner" :`, ep.Resp.IsLearner)
 		fmt.Println(`"RaftIndex" :`, ep.Resp.RaftIndex)
@@ -203,6 +204,8 @@ func (p *fieldsPrinter) EndpointStatus(eps []epStatus) {
 		fmt.Println(`"RaftAppliedIndex" :`, ep.Resp.RaftAppliedIndex)
 		fmt.Println(`"Errors" :`, ep.Resp.Errors)
 		fmt.Printf("\"Endpoint\" : %q\n", ep.Ep)
+		fmt.Printf("\"DowngradeTargetVersion\" : %q\n", ep.Resp.DowngradeInfo.GetTargetVersion())
+		fmt.Println(`"DowngradeEnabled" :`, ep.Resp.DowngradeInfo.GetEnabled())
 		fmt.Println()
 	}
 }
@@ -248,9 +251,11 @@ func (p *fieldsPrinter) RoleList(r v3.AuthRoleListResponse) {
 	}
 	fmt.Println()
 }
+
 func (p *fieldsPrinter) RoleGrantPermission(role string, r v3.AuthRoleGrantPermissionResponse) {
 	p.hdr(r.Header)
 }
+
 func (p *fieldsPrinter) RoleRevokePermission(role string, key string, end string, r v3.AuthRoleRevokePermissionResponse) {
 	p.hdr(r.Header)
 }
@@ -259,6 +264,7 @@ func (p *fieldsPrinter) UserChangePassword(r v3.AuthUserChangePasswordResponse) 
 func (p *fieldsPrinter) UserGrantRole(user string, role string, r v3.AuthUserGrantRoleResponse) {
 	p.hdr(r.Header)
 }
+
 func (p *fieldsPrinter) UserRevokeRole(user string, role string, r v3.AuthUserRevokeRoleResponse) {
 	p.hdr(r.Header)
 }

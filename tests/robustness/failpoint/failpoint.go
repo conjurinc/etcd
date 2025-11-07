@@ -26,98 +26,92 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
+	"go.etcd.io/etcd/tests/v3/robustness/identity"
+	"go.etcd.io/etcd/tests/v3/robustness/report"
+	"go.etcd.io/etcd/tests/v3/robustness/traffic"
 )
 
 const (
-	triggerTimeout               = time.Minute
-	waitBetweenFailpointTriggers = time.Second
-	failpointInjectionsCount     = 1
-	failpointInjectionsRetries   = 3
+	triggerTimeout = time.Minute
 )
 
-var (
-	allFailpoints = []Failpoint{
-		KillFailpoint, BeforeCommitPanic, AfterCommitPanic, RaftBeforeSavePanic, RaftAfterSavePanic,
-		DefragBeforeCopyPanic, DefragBeforeRenamePanic, BackendBeforePreCommitHookPanic, BackendAfterPreCommitHookPanic,
-		BackendBeforeStartDBTxnPanic, BackendAfterStartDBTxnPanic, BackendBeforeWritebackBufPanic,
-		BackendAfterWritebackBufPanic, CompactBeforeCommitScheduledCompactPanic, CompactAfterCommitScheduledCompactPanic,
-		CompactBeforeSetFinishedCompactPanic, CompactAfterSetFinishedCompactPanic, CompactBeforeCommitBatchPanic,
-		CompactAfterCommitBatchPanic, RaftBeforeLeaderSendPanic, BlackholePeerNetwork, DelayPeerNetwork,
-		RaftBeforeFollowerSendPanic, RaftBeforeApplySnapPanic, RaftAfterApplySnapPanic, RaftAfterWALReleasePanic,
-		RaftBeforeSaveSnapPanic, RaftAfterSaveSnapPanic, BlackholeUntilSnapshot,
-		BeforeApplyOneConfChangeSleep,
-		MemberReplace,
-		DropPeerNetwork,
-	}
-)
+var allFailpoints = []Failpoint{
+	KillFailpoint, BeforeCommitPanic, AfterCommitPanic, RaftBeforeSavePanic, RaftAfterSavePanic,
+	DefragBeforeCopyPanic, DefragBeforeRenamePanic, BackendBeforePreCommitHookPanic, BackendAfterPreCommitHookPanic,
+	BackendBeforeStartDBTxnPanic, BackendAfterStartDBTxnPanic, BackendBeforeWritebackBufPanic,
+	BackendAfterWritebackBufPanic, CompactBeforeCommitScheduledCompactPanic, CompactAfterCommitScheduledCompactPanic,
+	CompactBeforeSetFinishedCompactPanic, CompactAfterSetFinishedCompactPanic, CompactBeforeCommitBatchPanic,
+	CompactAfterCommitBatchPanic, RaftBeforeLeaderSendPanic, BlackholePeerNetwork, DelayPeerNetwork,
+	RaftBeforeFollowerSendPanic, RaftBeforeApplySnapPanic, RaftAfterApplySnapPanic, RaftAfterWALReleasePanic,
+	RaftBeforeSaveSnapPanic, RaftAfterSaveSnapPanic, BlackholeUntilSnapshot,
+	BeforeApplyOneConfChangeSleep,
+	MemberReplace,
+	MemberDowngrade,
+	MemberDowngradeUpgrade,
+	DropPeerNetwork,
+	RaftBeforeSaveSleep,
+	RaftAfterSaveSleep,
+	ApplyBeforeOpenSnapshot,
+	SleepBeforeSendWatchResponse,
+}
 
-func PickRandom(t *testing.T, clus *e2e.EtcdProcessCluster) Failpoint {
+func PickRandom(clus *e2e.EtcdProcessCluster, profile traffic.Profile) (Failpoint, error) {
 	availableFailpoints := make([]Failpoint, 0, len(allFailpoints))
 	for _, failpoint := range allFailpoints {
-		err := Validate(clus, failpoint)
+		err := Validate(clus, failpoint, profile)
 		if err != nil {
 			continue
 		}
 		availableFailpoints = append(availableFailpoints, failpoint)
 	}
 	if len(availableFailpoints) == 0 {
-		t.Errorf("No available failpoints")
-		return nil
+		return nil, fmt.Errorf("no available failpoints")
 	}
-	return availableFailpoints[rand.Int()%len(availableFailpoints)]
+	return availableFailpoints[rand.Int()%len(availableFailpoints)], nil
 }
 
-func Validate(clus *e2e.EtcdProcessCluster, failpoint Failpoint) error {
+func Validate(clus *e2e.EtcdProcessCluster, failpoint Failpoint, profile traffic.Profile) error {
 	for _, proc := range clus.Procs {
-		if !failpoint.Available(*clus.Cfg, proc) {
+		if !failpoint.Available(*clus.Cfg, proc, profile) {
 			return fmt.Errorf("failpoint %q not available on %s", failpoint.Name(), proc.Config().Name)
 		}
 	}
 	return nil
 }
 
-func Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster, failpoint Failpoint) {
-	ctx, cancel := context.WithTimeout(ctx, triggerTimeout)
+func Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster, failpoint Failpoint, baseTime time.Time, ids identity.Provider) (*report.FailpointReport, error) {
+	timeout := triggerTimeout
+	if timeoutObj, ok := failpoint.(TimeoutInterface); ok {
+		timeout = timeoutObj.Timeout()
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var err error
-	successes := 0
-	failures := 0
-	for successes < failpointInjectionsCount && failures < failpointInjectionsRetries {
-		time.Sleep(waitBetweenFailpointTriggers)
 
-		lg.Info("Verifying cluster health before failpoint", zap.String("failpoint", failpoint.Name()))
-		if err = verifyClusterHealth(ctx, t, clus); err != nil {
-			t.Errorf("failed to verify cluster health before failpoint injection, err: %v", err)
-			return
-		}
-
-		lg.Info("Triggering failpoint", zap.String("failpoint", failpoint.Name()))
-		err = failpoint.Inject(ctx, t, lg, clus)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				t.Errorf("Triggering failpoints timed out, err: %v", ctx.Err())
-				return
-			default:
-			}
-			lg.Info("Failed to trigger failpoint", zap.String("failpoint", failpoint.Name()), zap.Error(err))
-			failures++
-			continue
-		}
-
-		lg.Info("Verifying cluster health after failpoint", zap.String("failpoint", failpoint.Name()))
-		if err = verifyClusterHealth(ctx, t, clus); err != nil {
-			t.Errorf("failed to verify cluster health after failpoint injection, err: %v", err)
-			return
-		}
-
-		successes++
+	if err = verifyClusterHealth(ctx, t, clus); err != nil {
+		return nil, fmt.Errorf("failed to verify cluster health before failpoint injection, err: %w", err)
 	}
-	if successes < failpointInjectionsCount || failures >= failpointInjectionsRetries {
-		t.Errorf("failed to trigger failpoints enough times, err: %v", err)
+	lg.Info("Triggering failpoint", zap.String("failpoint", failpoint.Name()))
+	start := time.Since(baseTime)
+	clientReport, err := failpoint.Inject(ctx, t, lg, clus, baseTime, ids)
+	if err != nil {
+		lg.Error("Failed to trigger failpoint", zap.String("failpoint", failpoint.Name()), zap.Error(err))
+		return nil, fmt.Errorf("failed triggering failpoint, err: %w", err)
 	}
+	if err = verifyClusterHealth(ctx, t, clus); err != nil {
+		return nil, fmt.Errorf("failed to verify cluster health after failpoint injection, err: %w", err)
+	}
+	lg.Info("Finished triggering failpoint", zap.String("failpoint", failpoint.Name()))
+	end := time.Since(baseTime)
 
-	return
+	return &report.FailpointReport{
+		FailpointInjection: report.FailpointInjection{
+			Start: start,
+			End:   end,
+			Name:  failpoint.Name(),
+		},
+		Client: clientReport,
+	}, nil
 }
 
 func verifyClusterHealth(ctx context.Context, _ *testing.T, clus *e2e.EtcdProcessCluster) error {
@@ -129,14 +123,14 @@ func verifyClusterHealth(ctx context.Context, _ *testing.T, clus *e2e.EtcdProces
 			DialKeepAliveTimeout: 100 * time.Millisecond,
 		})
 		if err != nil {
-			return fmt.Errorf("Error creating client for cluster %s: %v", clus.Procs[i].Config().Name, err)
+			return fmt.Errorf("Error creating client for cluster %s: %w", clus.Procs[i].Config().Name, err)
 		}
 		defer clusterClient.Close()
 
 		cli := healthpb.NewHealthClient(clusterClient.ActiveConnection())
 		resp, err := cli.Check(ctx, &healthpb.HealthCheckRequest{})
 		if err != nil {
-			return fmt.Errorf("Error checking member %s health: %v", clus.Procs[i].Config().Name, err)
+			return fmt.Errorf("Error checking member %s health: %w", clus.Procs[i].Config().Name, err)
 		}
 		if resp.Status != healthpb.HealthCheckResponse_SERVING {
 			return fmt.Errorf("Member %s health status expected %s, got %s",
@@ -149,11 +143,15 @@ func verifyClusterHealth(ctx context.Context, _ *testing.T, clus *e2e.EtcdProces
 }
 
 type Failpoint interface {
-	Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster) error
+	Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster, baseTime time.Time, ids identity.Provider) ([]report.ClientReport, error)
 	Name() string
 	AvailabilityChecker
 }
 
 type AvailabilityChecker interface {
-	Available(e2e.EtcdProcessClusterConfig, e2e.EtcdProcess) bool
+	Available(e2e.EtcdProcessClusterConfig, e2e.EtcdProcess, traffic.Profile) bool
+}
+
+type TimeoutInterface interface {
+	Timeout() time.Duration
 }

@@ -41,6 +41,7 @@ var (
 		"3.4.0": {AuthCapability: true, V3rpcCapability: true},
 		"3.5.0": {AuthCapability: true, V3rpcCapability: true},
 		"3.6.0": {AuthCapability: true, V3rpcCapability: true},
+		"3.7.0": {AuthCapability: true, V3rpcCapability: true},
 	}
 
 	enableMapMu sync.RWMutex
@@ -64,7 +65,7 @@ func UpdateCapability(lg *zap.Logger, v *semver.Version) {
 		return
 	}
 	enableMapMu.Lock()
-	if curVersion != nil && !serverversion.IsValidVersionChange(v, curVersion) {
+	if curVersion != nil && !serverversion.IsValidClusterVersionChange(curVersion, v) {
 		enableMapMu.Unlock()
 		return
 	}
