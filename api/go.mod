@@ -1,8 +1,8 @@
 module go.etcd.io/etcd/api/v3
 
-go 1.24
+go 1.24.0
 
-toolchain go1.24.9
+toolchain go1.24.12
 
 require (
 	github.com/coreos/go-semver v0.3.0
@@ -14,8 +14,11 @@ require (
 )
 
 require (
+	github.com/google/go-cmp v0.7.0 // indirect
+	go.opentelemetry.io/otel v1.40.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.40.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
 	google.golang.org/genproto v0.0.0-20230822172742-b8732ec3820d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250115164207-1a7da9e5054f // indirect
